@@ -52,7 +52,7 @@ class SettingsDialog(QDialog):
         self.tabs.addTab(
             self._build_dictionary_tab(self.location_tree, LOCATION_SHEET), "位置"
         )
-        self.tabs.addTab(self._build_enum_tab(), "状态与来源")
+        self.tabs.addTab(self._build_enum_tab(), "使用状态与取得方式")
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
@@ -111,8 +111,8 @@ class SettingsDialog(QDialog):
         tab = QWidget()
         layout = QHBoxLayout(tab)
         for title, widget, enum_type in (
-            ("设备状态", self.status_list, "状态"),
-            ("设备来源", self.source_list, "来源"),
+            ("使用状态", self.status_list, "使用状态"),
+            ("取得方式", self.source_list, "取得方式"),
         ):
             panel = QWidget()
             panel_layout = QVBoxLayout(panel)
@@ -133,8 +133,12 @@ class SettingsDialog(QDialog):
         self.operator_edit.setText(self.service.get_operator())
         self._populate_tree(self.category_tree, self.service.get_categories(include_disabled=True))
         self._populate_tree(self.location_tree, self.service.get_locations(include_disabled=True))
-        self.status_list.addItems(self.service.get_enum_values("状态", include_disabled=True))
-        self.source_list.addItems(self.service.get_enum_values("来源", include_disabled=True))
+        self.status_list.addItems(
+            self.service.get_enum_values("使用状态", include_disabled=True)
+        )
+        self.source_list.addItems(
+            self.service.get_enum_values("取得方式", include_disabled=True)
+        )
 
     @staticmethod
     def _populate_tree(tree: QTreeWidget, items) -> None:

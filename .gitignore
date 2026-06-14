@@ -1,11 +1,55 @@
-.venv/
+# Python bytecode and caches
 __pycache__/
 *.py[cod]
+*$py.class
 .pytest_cache/
-.coverage
-dist/
-build/
-*.egg-info/
-data/*.xlsx
-data/backups/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
 
+# Virtual environments and local environment variables
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+!.env.example
+
+# Test and coverage output
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+test-results/
+
+# Packaging and PyInstaller output
+build/
+dist/
+*.egg-info/
+*.egg
+*.spec.bak
+
+# Runtime business data and backups
+data/**
+!data/.gitkeep
+backups/
+~$*.xlsx
+
+# IDE and editor-local settings
+.vscode/
+.idea/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# Logs, temporary files, and OS metadata
+*.log
+*.tmp
+*.temp
+Thumbs.db
+Desktop.ini
+.DS_Store

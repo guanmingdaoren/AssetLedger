@@ -13,8 +13,9 @@ from asset_ledger.asset_service import AssetService
 from asset_ledger.excel_repository import ExcelRepository
 from asset_ledger.main_window import MainWindow
 from asset_ledger.settings_dialog import SettingsDialog
+from asset_ledger.widgets import NoWheelComboBox, NoWheelDoubleSpinBox
 
-from tests.test_asset_service import sample_asset
+from tests.test_asset_service import sample_asset, sample_storage
 
 
 class GuiTests(unittest.TestCase):
@@ -73,6 +74,39 @@ class GuiTests(unittest.TestCase):
         dialog.owner_combo.setCurrentText("")
         self.assertEqual(dialog.asset_data()["owner"], "")
 
+    def test_new_asset_dialog_defaults_optional_choices_to_blank(self) -> None:
+        dialog = AssetDialog(self.service)
+
+        self.assertEqual(dialog.primary_category_combo.currentText(), "")
+        self.assertEqual(dialog.source_combo.currentText(), "")
+        self.assertEqual(dialog.status_combo.currentText(), "")
+        self.assertEqual(dialog.equipment_code_edit.text(), "")
+
+    def test_asset_dialog_loads_storage_media_table(self) -> None:
+        asset = self.service.create_asset(sample_asset(), [sample_storage()])
+
+        dialog = AssetDialog(self.service, asset)
+
+        self.assertEqual(dialog.storage_table.rowCount(), 1)
+        self.assertEqual(dialog.storage_media_data()[0]["serial_number"], "SSD-SN-001")
+
+    def test_no_wheel_controls_ignore_wheel_changes(self) -> None:
+        combo = NoWheelComboBox()
+        combo.addItems(["", "A", "B"])
+        combo.setCurrentIndex(1)
+        spin = NoWheelDoubleSpinBox()
+        spin.setValue(10)
+
+        class WheelEvent:
+            def ignore(self) -> None:
+                pass
+
+        combo.wheelEvent(WheelEvent())
+        spin.wheelEvent(WheelEvent())
+
+        self.assertEqual(combo.currentIndex(), 1)
+        self.assertEqual(spin.value(), 10)
+
     def test_main_window_loads_asset_table_and_detail_tabs(self) -> None:
         self.service.create_asset(sample_asset())
 
@@ -94,11 +128,32 @@ class GuiTests(unittest.TestCase):
         )
         window = MainWindow(self.service, self.path)
 
-        window.owner_filter.setCurrentIndex(window.owner_filter.findText("未分配责任人"))
+        window.owner_filter.setCurrentIndex(window.owner_filter.findText("未分配管理人"))
         self.application.processEvents()
 
         self.assertEqual(window.asset_table.rowCount(), 1)
         self.assertEqual(window.asset_table.item(0, 1).text(), "EQ-002")
+        window.close()
+
+    def test_main_window_filters_user_and_shows_storage_in_detail(self) -> None:
+        first = self.service.create_asset(sample_asset(), [sample_storage()])
+        self.service.create_asset(
+            sample_asset(
+                equipment_code="EQ-002",
+                serial_number="SN-002",
+                user="王五",
+            )
+        )
+        window = MainWindow(self.service, self.path)
+
+        window.user_filter.setCurrentIndex(window.user_filter.findText("王五"))
+        self.application.processEvents()
+
+        self.assertEqual(window.asset_table.rowCount(), 1)
+        window.clear_filters()
+        window._select_asset(first.asset_id)
+        window.show_selected_asset()
+        self.assertIn("SSD-SN-001", window.detail_text.toPlainText())
         window.close()
 
     def test_history_can_filter_by_changed_field(self) -> None:
@@ -114,15 +169,15 @@ class GuiTests(unittest.TestCase):
             window.history_filter.itemText(index)
             for index in range(window.history_filter.count())
         ]
-        self.assertIn("状态", fields)
-        self.assertIn("位置", fields)
+        self.assertIn("使用状态", fields)
+        self.assertIn("存放地点", fields)
         self.assertNotIn("*", fields)
 
-        window.history_filter.setCurrentText("位置")
+        window.history_filter.setCurrentText("存放地点")
         self.application.processEvents()
 
-        self.assertIn("位置变更", window.history_text.toPlainText())
-        self.assertNotIn("状态变更", window.history_text.toPlainText())
+        self.assertIn("存放地点变更", window.history_text.toPlainText())
+        self.assertNotIn("使用状态变更", window.history_text.toPlainText())
         window.close()
 
     def test_refresh_preserves_selection_and_shows_refresh_time(self) -> None:
@@ -146,12 +201,12 @@ class GuiTests(unittest.TestCase):
             sample_asset(equipment_code="EQ-002", serial_number="SN-002", owner="")
         )
         window = MainWindow(self.service, self.path)
-        window.owner_filter.setCurrentIndex(window.owner_filter.findText("未分配责任人"))
+        window.owner_filter.setCurrentIndex(window.owner_filter.findText("未分配管理人"))
 
         window.refresh_all()
         self.application.processEvents()
 
-        self.assertEqual(window.owner_filter.currentText(), "未分配责任人")
+        self.assertEqual(window.owner_filter.currentText(), "未分配管理人")
         self.assertEqual(window.asset_table.rowCount(), 1)
         window.close()
 
@@ -179,6 +234,52 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(window.asset_table.rowCount(), 1)
         window.close()
 
+    def test_clear_filters_removes_category_filter(self) -> None:
+        self.service.create_asset(sample_asset())
+        self.service.create_asset(
+            sample_asset(
+                equipment_code="EQ-002",
+                serial_number="SN-002",
+                primary_category="办公设备",
+                secondary_category="打印机",
+            )
+        )
+        window = MainWindow(self.service, self.path)
+        computer_item = window.category_tree.topLevelItem(0).child(0)
+        window.category_tree.setCurrentItem(computer_item)
+        window.refresh_assets()
+        self.assertEqual(window.asset_table.rowCount(), 1)
+
+        window.clear_filters()
+        self.application.processEvents()
+
+        self.assertIsNone(window.category_tree.currentItem())
+        self.assertEqual(window.asset_table.rowCount(), 2)
+        window.close()
+
+    def test_quick_all_view_clears_category_filter(self) -> None:
+        self.service.create_asset(sample_asset())
+        self.service.create_asset(
+            sample_asset(
+                equipment_code="EQ-002",
+                serial_number="SN-002",
+                primary_category="办公设备",
+                secondary_category="打印机",
+            )
+        )
+        window = MainWindow(self.service, self.path)
+        computer_item = window.category_tree.topLevelItem(0).child(0)
+        window.category_tree.setCurrentItem(computer_item)
+        window.refresh_assets()
+        self.assertEqual(window.asset_table.rowCount(), 1)
+
+        window._quick_filter("全部")
+        self.application.processEvents()
+
+        self.assertIsNone(window.category_tree.currentItem())
+        self.assertEqual(window.asset_table.rowCount(), 2)
+        window.close()
+
     def test_refresh_after_save_selects_asset_and_opens_history(self) -> None:
         asset = self.service.create_asset(sample_asset())
         window = MainWindow(self.service, self.path)
@@ -189,7 +290,7 @@ class GuiTests(unittest.TestCase):
 
         self.assertEqual(window._selected_asset().asset_id, asset.asset_id)
         self.assertEqual(window.detail_tabs.currentIndex(), 1)
-        self.assertIn("状态变更", window.history_text.toPlainText())
+        self.assertIn("使用状态变更", window.history_text.toPlainText())
         window.close()
 
     def test_refresh_after_save_reveals_asset_that_no_longer_matches_filter(self) -> None:
@@ -205,7 +306,7 @@ class GuiTests(unittest.TestCase):
         self.application.processEvents()
 
         self.assertEqual(window._selected_asset().asset_id, asset.asset_id)
-        self.assertEqual(window.status_filter.currentText(), "全部状态")
+        self.assertEqual(window.status_filter.currentText(), "全部使用状态")
         window.close()
 
     def test_main_window_defines_readable_selected_row_style(self) -> None:

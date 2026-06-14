@@ -8,7 +8,6 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -34,6 +33,7 @@ from .asset_service import AssetService
 from .excel_repository import ExcelRepository
 from .models import Asset
 from .settings_dialog import SettingsDialog
+from .widgets import NoWheelComboBox
 
 
 STATUS_COLORS = {
@@ -47,15 +47,16 @@ STATUS_COLORS = {
 }
 
 TABLE_COLUMNS = [
-    ("asset_id", "资产 ID"),
-    ("equipment_code", "装备编码"),
-    ("name", "设备名称"),
+    ("asset_id", "资产唯一标识符"),
+    ("equipment_code", "bm编码"),
+    ("name", "设备器材"),
     ("secondary_category", "类别"),
-    ("brand_model", "品牌 / 型号"),
-    ("status", "状态"),
-    ("location", "位置"),
-    ("owner", "责任人"),
-    ("price", "价格"),
+    ("brand_model", "品牌 / 产品型号"),
+    ("status", "使用状态"),
+    ("location", "存放地点"),
+    ("owner", "管理人"),
+    ("user", "使用人"),
+    ("price", "金额"),
     ("updated_at", "更新时间"),
 ]
 
@@ -127,16 +128,18 @@ class MainWindow(QMainWindow):
         layout.addLayout(quick_row)
 
         layout.addWidget(self._section_label("筛选条件"))
-        self.status_filter = self._filter_combo("全部状态")
+        self.status_filter = self._filter_combo("全部使用状态")
         self.location_filter = self._filter_combo("全部位置")
         self.brand_filter = self._filter_combo("全部品牌")
-        self.owner_filter = self._filter_combo("全部责任人")
-        self.source_filter = self._filter_combo("全部来源")
+        self.owner_filter = self._filter_combo("全部管理人")
+        self.user_filter = self._filter_combo("全部使用人")
+        self.source_filter = self._filter_combo("全部取得方式")
         for combo in (
             self.status_filter,
             self.location_filter,
             self.brand_filter,
             self.owner_filter,
+            self.user_filter,
             self.source_filter,
         ):
             combo.currentTextChanged.connect(self.refresh_assets)
@@ -157,7 +160,9 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         toolbar = QHBoxLayout()
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("搜索资产 ID、装备编码、名称、品牌或型号")
+        self.search_edit.setPlaceholderText(
+            "搜索资产ID、bm编码、设备器材、品牌型号、厂家、人员或存储介质序列号"
+        )
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.textChanged.connect(self.refresh_assets)
         new_button = QPushButton("新增设备")
@@ -194,7 +199,7 @@ class MainWindow(QMainWindow):
         self.asset_table.verticalHeader().setVisible(False)
         self.asset_table.itemSelectionChanged.connect(self.show_selected_asset)
         self.asset_table.itemDoubleClicked.connect(self.edit_selected_asset)
-        widths = [150, 135, 160, 120, 160, 90, 120, 100, 110, 155]
+        widths = [155, 125, 150, 110, 150, 90, 110, 90, 90, 105, 145]
         for index, width in enumerate(widths):
             self.asset_table.setColumnWidth(index, width)
         layout.addWidget(self.asset_table, 1)
@@ -211,7 +216,7 @@ class MainWindow(QMainWindow):
         history_layout = QVBoxLayout(history_panel)
         history_layout.setContentsMargins(0, 0, 0, 0)
         history_toolbar = QHBoxLayout()
-        self.history_filter = QComboBox()
+        self.history_filter = NoWheelComboBox()
         self.history_filter.addItem("全部变化", "")
         self.history_filter.currentTextChanged.connect(self.refresh_history)
         history_refresh_button = QPushButton("刷新")
@@ -240,8 +245,8 @@ class MainWindow(QMainWindow):
         return label
 
     @staticmethod
-    def _filter_combo(all_text: str) -> QComboBox:
-        combo = QComboBox()
+    def _filter_combo(all_text: str) -> NoWheelComboBox:
+        combo = NoWheelComboBox()
         combo.addItem(all_text, "")
         return combo
 
@@ -262,6 +267,7 @@ class MainWindow(QMainWindow):
             self.location_filter: self.location_filter.currentData(),
             self.brand_filter: self.brand_filter.currentData(),
             self.owner_filter: self.owner_filter.currentData(),
+            self.user_filter: self.user_filter.currentData(),
             self.source_filter: self.source_filter.currentData(),
         }
         options = {
@@ -269,6 +275,7 @@ class MainWindow(QMainWindow):
             self.location_filter: sorted({asset.location for asset in assets if asset.location}),
             self.brand_filter: sorted({asset.brand for asset in assets if asset.brand}),
             self.owner_filter: self.service.list_owners(),
+            self.user_filter: self.service.list_users(),
             self.source_filter: sorted({asset.source for asset in assets if asset.source}),
         }
         for combo, values in options.items():
@@ -277,7 +284,9 @@ class MainWindow(QMainWindow):
             combo.clear()
             combo.addItem(label, "")
             if combo is self.owner_filter:
-                combo.addItem("未分配责任人", None)
+                combo.addItem("未分配管理人", None)
+            if combo is self.user_filter:
+                combo.addItem("未分配使用人", None)
             for value in values:
                 combo.addItem(value, value)
             index = combo.findData(current_values[combo])
@@ -315,6 +324,7 @@ class MainWindow(QMainWindow):
             ("location", self.location_filter),
             ("brand", self.brand_filter),
             ("owner", self.owner_filter),
+            ("user", self.user_filter),
             ("source", self.source_filter),
         ):
             value = combo.currentData()
@@ -338,6 +348,7 @@ class MainWindow(QMainWindow):
                 asset.status,
                 asset.location,
                 asset.owner,
+                asset.user,
                 f"¥ {asset.price:,.2f}",
                 asset.updated_at,
             ]
@@ -347,7 +358,7 @@ class MainWindow(QMainWindow):
                 if column == 5:
                     item.setBackground(QColor(STATUS_COLORS.get(asset.status, "#FFFFFF")))
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if column == 8:
+                if column == 9:
                     item.setTextAlignment(
                         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
                     )
@@ -368,38 +379,89 @@ class MainWindow(QMainWindow):
         if not asset:
             return
         fields = [
-            ("资产 ID", asset.asset_id),
-            ("装备编码", asset.equipment_code),
-            ("设备名称", asset.name),
+            ("资产唯一标识符", asset.asset_id),
+            ("bm编码", asset.equipment_code),
+            ("设备器材", asset.name),
             (
                 "设备分类",
                 " / ".join(v for v in (asset.primary_category, asset.secondary_category) if v),
             ),
-            ("品牌 / 型号", " / ".join(v for v in (asset.brand, asset.model) if v)),
-            ("序列号", asset.serial_number),
-            ("来源", asset.source),
-            ("价格", f"¥ {asset.price:,.2f}"),
+            ("产品规格", asset.product_spec),
+            ("品牌 / 产品型号", " / ".join(v for v in (asset.brand, asset.model) if v)),
+            ("设备序列号", asset.serial_number),
+            ("生产厂家", asset.manufacturer),
+            ("供应商", asset.supplier),
+            ("取得方式", asset.source),
+            ("计价方式 / 金额", " / ".join(v for v in (asset.valuation_method, f"¥ {asset.price:,.2f}") if v)),
             (
-                "购入 / 启用日期",
-                " / ".join(v for v in (asset.purchase_date, asset.start_date) if v),
+                "取得 / 启用 / 出厂日期",
+                " / ".join(
+                    v
+                    for v in (
+                        asset.purchase_date,
+                        asset.start_date,
+                        asset.manufacture_date,
+                    )
+                    if v
+                ),
             ),
-            ("状态", asset.status),
-            ("位置", asset.location),
+            ("等级", asset.grade),
+            ("使用状态", asset.status),
+            ("存放地点", asset.location),
             (
-                "责任部门 / 人",
+                "管理部门 / 管理人",
                 " / ".join(v for v in (asset.department, asset.owner) if v),
             ),
+            (
+                "使用部门 / 使用人",
+                " / ".join(v for v in (asset.use_department, asset.user) if v),
+            ),
+            ("是否已打印标签", "是" if asset.label_printed else "否"),
             ("备注", asset.notes),
             ("创建时间", asset.created_at),
             ("更新时间", asset.updated_at),
         ]
+        media = self.service.list_storage_media(asset.asset_id)
+        storage_html = (
+            "<h3>存储介质</h3>"
+            + "".join(
+                (
+                    "<p><b>{}</b><br>{}</p>".format(
+                        escape(medium.name or medium.medium_type or "未命名介质"),
+                        escape(
+                            " / ".join(
+                                value
+                                for value in (
+                                    medium.medium_type,
+                                    medium.brand,
+                                    (
+                                        f"{self.service._display_value(medium.capacity_value)}"
+                                        f"{medium.capacity_unit}"
+                                        if medium.capacity_value
+                                        else ""
+                                    ),
+                                    medium.model,
+                                    medium.serial_number,
+                                    medium.notes,
+                                )
+                                if value
+                            )
+                        ),
+                    )
+                )
+                for medium in media
+            )
+            if media
+            else "<h3>存储介质</h3><p>无存储介质</p>"
+        )
         self.detail_text.setHtml(
-            "<h2>{}</h2>{}".format(
+            "<h2>{}</h2>{}{}".format(
                 escape(asset.name),
                 "".join(
                     f"<p><b>{escape(label)}</b><br>{escape(str(value or '—'))}</p>"
                     for label, value in fields
                 ),
+                storage_html,
             )
         )
         self._load_history_filter(asset.asset_id)
@@ -436,7 +498,9 @@ class MainWindow(QMainWindow):
         if dialog.exec() != AssetDialog.DialogCode.Accepted:
             return
         try:
-            created = self.service.create_asset(dialog.asset_data(), dialog.change_note())
+            created = self.service.create_asset(
+                dialog.asset_data(), dialog.storage_media_data(), dialog.change_note()
+            )
             self.refresh_all()
             self._select_asset(created.asset_id)
             self.statusBar().showMessage(f"已新增 {created.name}", 5000)
@@ -453,7 +517,10 @@ class MainWindow(QMainWindow):
             return
         try:
             updated = self.service.update_asset(
-                asset.asset_id, dialog.asset_data(), dialog.change_note()
+                asset.asset_id,
+                dialog.asset_data(),
+                dialog.storage_media_data(),
+                dialog.change_note(),
             )
             self.refresh_after_save(updated.asset_id)
             self.statusBar().showMessage(f"已更新 {updated.name}", 5000)
@@ -484,16 +551,21 @@ class MainWindow(QMainWindow):
             self.location_filter,
             self.brand_filter,
             self.owner_filter,
+            self.user_filter,
             self.source_filter,
         ):
             combo.setCurrentIndex(0)
+        self.category_tree.setCurrentItem(None)
         self.category_tree.clearSelection()
         self.search_edit.clear()
         self.refresh_assets()
 
     def _quick_filter(self, value: str) -> None:
+        if value == "全部":
+            self.clear_filters()
+            return
         self.status_filter.setCurrentIndex(
-            0 if value == "全部" else max(self.status_filter.findData(value), 0)
+            max(self.status_filter.findData(value), 0)
         )
         self.refresh_assets()
 

@@ -12,13 +12,23 @@ from .excel_repository import ExcelRepository
 from .main_window import MainWindow
 
 
+def application_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path.cwd()
+
+
+def default_workbook_path() -> Path:
+    return application_base_dir() / "data" / "设备资产台账.xlsx"
+
+
 def main() -> int:
     application = QApplication(sys.argv)
     application.setApplicationName("设备资产台账")
     application.setOrganizationName("AssetLedger")
     application.setFont(QFont("Microsoft YaHei UI", 9))
     settings = QSettings()
-    default_path = Path.cwd() / "data" / "设备资产台账.xlsx"
+    default_path = default_workbook_path()
     workbook_path = Path(settings.value("workbook_path", str(default_path)))
     repository = ExcelRepository(workbook_path)
     try:
