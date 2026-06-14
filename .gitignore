@@ -53,3 +53,7 @@ backups/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Record,image
+image/
+git同步.md
