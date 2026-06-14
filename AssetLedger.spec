@@ -6,12 +6,13 @@ from PyInstaller.utils.hooks import collect_data_files
 
 
 project_root = Path(SPECPATH)
+app_icon = project_root / "assets" / "app_icon.ico"
 
 analysis = Analysis(
     [str(project_root / "packaging" / "asset_ledger_launcher.py")],
     pathex=[str(project_root / "src")],
     binaries=[],
-    datas=collect_data_files("openpyxl"),
+    datas=collect_data_files("openpyxl") + [(str(app_icon), "assets")],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -29,6 +30,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="设备资产台账",
+    icon=str(app_icon),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

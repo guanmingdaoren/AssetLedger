@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from collections import defaultdict
+from dataclasses import asdict, replace
 from datetime import date, datetime
 from typing import Any
 from uuid import uuid4
@@ -18,8 +19,10 @@ from .excel_repository import (
     STORAGE_HEADERS,
     STORAGE_SHEET,
     ExcelRepository,
+    WorkbookChangedExternallyError,
 )
 from .models import Asset, ChangeRecord, DictionaryItem, StorageMedium, timestamp_now
+from .snapshot import CacheStatus, LedgerSnapshot
 
 
 class AssetServiceError(ValueError):
@@ -31,6 +34,14 @@ class DuplicateEquipmentCodeError(AssetServiceError):
 
 
 class AssetNotFoundError(AssetServiceError):
+    pass
+
+
+class CacheUnavailableError(AssetServiceError):
+    pass
+
+
+class CacheReloadAfterSaveError(AssetServiceError):
     pass
 
 
@@ -98,29 +109,35 @@ STORAGE_EDITABLE_FIELDS = [
 class AssetService:
     def __init__(self, repository: ExcelRepository) -> None:
         self.repository = repository
+        self._snapshot: LedgerSnapshot | None = None
+        self.cache_status = CacheStatus()
+        self.reload_cache()
+
+    def reload_cache(self) -> CacheStatus:
+        last_error: Exception | None = None
+        for _attempt in range(2):
+            workbook = None
+            try:
+                workbook, fingerprint = self.repository.load_with_fingerprint(data_only=True)
+                snapshot = self._snapshot_from_workbook(workbook, fingerprint)
+                self._snapshot = snapshot
+                self.cache_status = CacheStatus(loaded_at=snapshot.loaded_at, stale=False)
+                return self.cache_status
+            except WorkbookChangedExternallyError as exc:
+                last_error = exc
+            except Exception as exc:
+                self._mark_cache_stale(exc)
+                raise
+            finally:
+                if workbook is not None:
+                    workbook.close()
+        self._mark_cache_stale(last_error)
+        raise last_error or CacheUnavailableError("无法加载 Excel 缓存")
 
     def list_assets(
         self, filters: dict[str, str | None] | None = None, search_text: str = ""
     ) -> list[Asset]:
-        workbook = self.repository.load(data_only=True)
-        try:
-            assets = [
-                self._asset_from_row(row)
-                for row in workbook[ASSET_SHEET].iter_rows(min_row=2, values_only=True)
-                if row[0]
-            ]
-            storage_search_text: dict[str, str] = {}
-            for row in workbook[STORAGE_SHEET].iter_rows(min_row=2, values_only=True):
-                if not row[0]:
-                    continue
-                asset_id = str(row[1] or "")
-                storage_search_text[asset_id] = " ".join(
-                    [storage_search_text.get(asset_id, "")]
-                    + [str(value or "") for value in row[2:10]]
-                ).lower()
-        finally:
-            workbook.close()
-
+        snapshot = self._require_snapshot()
         filters = filters or {}
         filtered: list[Asset] = []
         needle = search_text.strip().lower()
@@ -139,22 +156,22 @@ class AssetService:
             "use_department",
             "user",
         )
-        for asset in assets:
+        for asset in snapshot.assets:
             if needle and not any(
                 needle in str(getattr(asset, field) or "").lower()
                 for field in searchable_fields
-            ) and needle not in storage_search_text.get(asset.asset_id, ""):
+            ) and needle not in snapshot.storage_search_text.get(asset.asset_id, ""):
                 continue
             if not self._matches_filters(asset, filters):
                 continue
-            filtered.append(asset)
+            filtered.append(replace(asset))
         return sorted(filtered, key=lambda item: item.updated_at, reverse=True)
 
     def get_asset(self, asset_id: str) -> Asset:
-        for asset in self.list_assets():
-            if asset.asset_id == asset_id:
-                return asset
-        raise AssetNotFoundError(f"未找到设备：{asset_id}")
+        asset = self._require_snapshot().assets_by_id.get(asset_id)
+        if not asset:
+            raise AssetNotFoundError(f"未找到设备：{asset_id}")
+        return replace(asset)
 
     def create_asset(
         self,
@@ -169,7 +186,7 @@ class AssetService:
         media = self._normalize_storage_media(storage_media or [])
         self._validate_asset(asset)
         self._validate_storage_media(media)
-        workbook = self.repository.load()
+        workbook = self._load_for_write()
         try:
             asset_sheet = workbook[ASSET_SHEET]
             self._ensure_equipment_code_unique(asset_sheet, asset.equipment_code)
@@ -216,10 +233,10 @@ class AssetService:
                     change_note,
                 )
             self._resize_table(storage_sheet)
-            self.repository.save(workbook)
+            self._save_and_reload(workbook)
         finally:
             workbook.close()
-        return asset
+        return self.get_asset(asset.asset_id)
 
     def update_asset(
         self,
@@ -240,7 +257,7 @@ class AssetService:
         self._validate_asset(candidate)
         if candidate_media is not None:
             self._validate_storage_media(candidate_media)
-        workbook = self.repository.load()
+        workbook = self._load_for_write()
         try:
             sheet = workbook[ASSET_SHEET]
             row_number = self._find_asset_row(sheet, asset_id)
@@ -318,47 +335,22 @@ class AssetService:
                     operator,
                     change_note,
                 )
-            self.repository.save(workbook)
+            self._save_and_reload(workbook)
         finally:
             workbook.close()
-        return candidate
+        return self.get_asset(asset_id)
 
     def list_changes(self, asset_id: str, field_name: str = "") -> list[ChangeRecord]:
-        workbook = self.repository.load(data_only=True)
-        try:
-            records = [
-                ChangeRecord(
-                    change_id=str(row[0] or ""),
-                    event_group_id=str(row[1] or ""),
-                    asset_id=str(row[2] or ""),
-                    event_type=str(row[3] or ""),
-                    field_name=str(row[4] or ""),
-                    old_value=self._display_value(row[5]),
-                    new_value=self._display_value(row[6]),
-                    changed_at=self._display_value(row[7]),
-                    operator=str(row[8] or ""),
-                    note=str(row[9] or ""),
-                )
-                for row in workbook[CHANGE_SHEET].iter_rows(min_row=2, values_only=True)
-                if row[0]
-                and str(row[2]) == asset_id
-                and (not field_name or str(row[4]) == field_name)
-            ]
-        finally:
-            workbook.close()
-        return sorted(records, key=lambda change: change.changed_at, reverse=True)
+        records = self._require_snapshot().changes_by_asset_id.get(asset_id, ())
+        return [
+            replace(change)
+            for change in records
+            if not field_name or change.field_name == field_name
+        ]
 
     def list_storage_media(self, asset_id: str) -> list[StorageMedium]:
-        workbook = self.repository.load(data_only=True)
-        try:
-            media = [
-                self._storage_from_row(row)
-                for row in workbook[STORAGE_SHEET].iter_rows(min_row=2, values_only=True)
-                if row[0] and str(row[1]) == asset_id
-            ]
-        finally:
-            workbook.close()
-        return sorted(media, key=lambda item: (item.created_at, item.storage_id))
+        media = self._require_snapshot().storage_by_asset_id.get(asset_id, ())
+        return [replace(item) for item in media]
 
     def list_departments(self) -> list[str]:
         return sorted({asset.department for asset in self.list_assets() if asset.department})
@@ -389,29 +381,21 @@ class AssetService:
         return self._get_dictionary_items(LOCATION_SHEET, include_disabled)
 
     def get_enum_values(self, enum_type: str, *, include_disabled: bool = False) -> list[str]:
-        workbook = self.repository.load(data_only=True)
-        try:
-            values = [
-                (int(row[2] or 0), str(row[1]))
-                for row in workbook[ENUM_SHEET].iter_rows(min_row=2, values_only=True)
-                if row[0] == enum_type and (include_disabled or bool(row[3]))
-            ]
-        finally:
-            workbook.close()
-        return [value for _, value in sorted(values)]
+        values = self._require_snapshot().enum_values.get(enum_type, ())
+        return [
+            value
+            for _order, value, enabled in values
+            if include_disabled or enabled
+        ]
 
     def get_operator(self) -> str:
-        workbook = self.repository.load(data_only=True)
-        try:
-            return self._get_config_value(workbook, "默认操作者", "管理员")
-        finally:
-            workbook.close()
+        return self._require_snapshot().config.get("默认操作者", "管理员")
 
     def set_operator(self, operator: str) -> None:
-        workbook = self.repository.load()
+        workbook = self._load_for_write()
         try:
             self._set_config_value(workbook, "默认操作者", operator.strip() or "管理员")
-            self.repository.save(workbook)
+            self._save_and_reload(workbook)
         finally:
             workbook.close()
 
@@ -423,7 +407,7 @@ class AssetService:
         clean_name = name.strip()
         if not clean_name:
             raise AssetServiceError("名称不能为空")
-        workbook = self.repository.load()
+        workbook = self._load_for_write()
         try:
             sheet = workbook[sheet_name]
             existing_rows = [
@@ -449,7 +433,7 @@ class AssetService:
                 sheet, [item.item_id, item.parent_id, item.name, item.order, item.enabled]
             )
             self._resize_table(sheet)
-            self.repository.save(workbook)
+            self._save_and_reload(workbook)
         finally:
             workbook.close()
         return item
@@ -459,13 +443,13 @@ class AssetService:
     ) -> None:
         if sheet_name not in {CATEGORY_SHEET, LOCATION_SHEET}:
             raise AssetServiceError(f"不支持的字典：{sheet_name}")
-        workbook = self.repository.load()
+        workbook = self._load_for_write()
         try:
             sheet = workbook[sheet_name]
             for row in sheet.iter_rows(min_row=2):
                 if row[0].value == item_id:
                     row[4].value = bool(enabled)
-                    self.repository.save(workbook)
+                    self._save_and_reload(workbook)
                     return
             raise AssetServiceError(f"未找到字典项：{item_id}")
         finally:
@@ -475,7 +459,7 @@ class AssetService:
         cleaned = list(dict.fromkeys(value.strip() for value in values if value.strip()))
         if not cleaned:
             raise AssetServiceError(f"{enum_type}至少需要一个选项")
-        workbook = self.repository.load()
+        workbook = self._load_for_write()
         try:
             sheet = workbook[ENUM_SHEET]
             preserved = [
@@ -490,15 +474,58 @@ class AssetService:
             for index, value in enumerate(cleaned, start=1):
                 sheet.append([enum_type, value, index * 10, True])
             self._resize_table(sheet)
-            self.repository.save(workbook)
+            self._save_and_reload(workbook)
         finally:
             workbook.close()
 
     def _get_dictionary_items(
         self, sheet_name: str, include_disabled: bool
     ) -> list[DictionaryItem]:
-        workbook = self.repository.load(data_only=True)
-        try:
+        items = self._require_snapshot().dictionaries.get(sheet_name, ())
+        return [
+            replace(item)
+            for item in items
+            if include_disabled or item.enabled
+        ]
+
+    def _snapshot_from_workbook(self, workbook, fingerprint) -> LedgerSnapshot:
+        assets = tuple(
+            self._asset_from_row(row)
+            for row in workbook[ASSET_SHEET].iter_rows(min_row=2, values_only=True)
+            if row[0]
+        )
+        storage_by_asset_id: dict[str, list[StorageMedium]] = defaultdict(list)
+        storage_search_text: dict[str, str] = {}
+        for row in workbook[STORAGE_SHEET].iter_rows(min_row=2, values_only=True):
+            if not row[0]:
+                continue
+            medium = self._storage_from_row(row)
+            storage_by_asset_id[medium.asset_id].append(medium)
+            storage_search_text[medium.asset_id] = " ".join(
+                [storage_search_text.get(medium.asset_id, "")]
+                + [str(value or "") for value in row[2:10]]
+            ).lower()
+
+        changes_by_asset_id: dict[str, list[ChangeRecord]] = defaultdict(list)
+        for row in workbook[CHANGE_SHEET].iter_rows(min_row=2, values_only=True):
+            if not row[0]:
+                continue
+            change = ChangeRecord(
+                change_id=str(row[0] or ""),
+                event_group_id=str(row[1] or ""),
+                asset_id=str(row[2] or ""),
+                event_type=str(row[3] or ""),
+                field_name=str(row[4] or ""),
+                old_value=self._display_value(row[5]),
+                new_value=self._display_value(row[6]),
+                changed_at=self._display_value(row[7]),
+                operator=str(row[8] or ""),
+                note=str(row[9] or ""),
+            )
+            changes_by_asset_id[change.asset_id].append(change)
+
+        dictionaries: dict[str, tuple[DictionaryItem, ...]] = {}
+        for sheet_name in (CATEGORY_SHEET, LOCATION_SHEET):
             items = [
                 DictionaryItem(
                     item_id=str(row[0] or ""),
@@ -508,11 +535,95 @@ class AssetService:
                     enabled=bool(row[4]),
                 )
                 for row in workbook[sheet_name].iter_rows(min_row=2, values_only=True)
-                if row[0] and (include_disabled or bool(row[4]))
+                if row[0]
             ]
-        finally:
-            workbook.close()
-        return sorted(items, key=lambda item: item.order)
+            dictionaries[sheet_name] = tuple(sorted(items, key=lambda item: item.order))
+
+        enum_values: dict[str, list[tuple[int, str, bool]]] = defaultdict(list)
+        for row in workbook[ENUM_SHEET].iter_rows(min_row=2, values_only=True):
+            if row[0]:
+                enum_values[str(row[0])].append(
+                    (int(row[2] or 0), str(row[1] or ""), bool(row[3]))
+                )
+        config = {
+            str(row[0]): str(row[1] or "")
+            for row in workbook[CONFIG_SHEET].iter_rows(min_row=2, values_only=True)
+            if row[0]
+        }
+        loaded_at = timestamp_now()
+        return LedgerSnapshot(
+            assets=assets,
+            assets_by_id={asset.asset_id: asset for asset in assets},
+            storage_by_asset_id={
+                asset_id: tuple(
+                    sorted(items, key=lambda item: (item.created_at, item.storage_id))
+                )
+                for asset_id, items in storage_by_asset_id.items()
+            },
+            changes_by_asset_id={
+                asset_id: tuple(
+                    sorted(items, key=lambda item: item.changed_at, reverse=True)
+                )
+                for asset_id, items in changes_by_asset_id.items()
+            },
+            storage_search_text=storage_search_text,
+            dictionaries=dictionaries,
+            enum_values={
+                enum_type: tuple(sorted(items))
+                for enum_type, items in enum_values.items()
+            },
+            config=config,
+            fingerprint=fingerprint,
+            loaded_at=loaded_at,
+        )
+
+    def _require_snapshot(self) -> LedgerSnapshot:
+        if self._snapshot is None:
+            raise CacheUnavailableError("内存缓存尚未加载，请点击刷新后重试。")
+        return self._snapshot
+
+    def _require_writable_snapshot(self) -> LedgerSnapshot:
+        snapshot = self._require_snapshot()
+        if self.cache_status.stale:
+            raise CacheUnavailableError(
+                "内存缓存已过期，为避免覆盖数据，已禁止保存。请点击刷新后重试。"
+            )
+        return snapshot
+
+    def _load_for_write(self):
+        snapshot = self._require_writable_snapshot()
+        try:
+            return self.repository.load(expected_fingerprint=snapshot.fingerprint)
+        except WorkbookChangedExternallyError as exc:
+            self._mark_cache_stale(exc)
+            raise
+
+    def _save_and_reload(self, workbook) -> None:
+        snapshot = self._require_writable_snapshot()
+        try:
+            self.repository.save(
+                workbook,
+                expected_fingerprint=snapshot.fingerprint,
+            )
+        except WorkbookChangedExternallyError as exc:
+            self._mark_cache_stale(exc)
+            raise
+        try:
+            self.reload_cache()
+        except Exception as exc:
+            self._mark_cache_stale(exc)
+            raise CacheReloadAfterSaveError(
+                "Excel 已保存，但内存缓存刷新失败。为避免重复写入，已禁止继续保存，"
+                "请点击刷新或重新启动程序。"
+            ) from exc
+
+    def _mark_cache_stale(self, error: Exception | None) -> None:
+        loaded_at = self._snapshot.loaded_at if self._snapshot else ""
+        self.cache_status = CacheStatus(
+            loaded_at=loaded_at,
+            stale=True,
+            error=str(error or "缓存状态未知"),
+        )
 
     @staticmethod
     def _matches_filters(asset: Asset, filters: dict[str, str | None]) -> bool:

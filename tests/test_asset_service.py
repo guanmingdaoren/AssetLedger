@@ -2,13 +2,19 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import perf_counter
 import unittest
+from unittest.mock import patch
 
 from asset_ledger.asset_service import (
     AssetService,
     AssetServiceError,
+    CacheReloadAfterSaveError,
+    CacheUnavailableError,
     DuplicateEquipmentCodeError,
 )
-from asset_ledger.excel_repository import ExcelRepository
+from asset_ledger.excel_repository import (
+    ExcelRepository,
+    WorkbookChangedExternallyError,
+)
 
 
 def sample_asset(**overrides):
@@ -78,6 +84,150 @@ class AssetServiceTests(unittest.TestCase):
         self.assertEqual(len(changes), 1)
         self.assertEqual(changes[0].event_type, "新建设备")
         self.assertEqual(changes[0].field_name, "*")
+
+    def test_queries_use_cache_without_reopening_workbook(self) -> None:
+        created = self.service.create_asset(sample_asset(), [sample_storage()])
+
+        with patch.object(
+            self.repository, "load", side_effect=AssertionError("不应重新读取 Excel")
+        ):
+            self.assertEqual(self.service.get_asset(created.asset_id).name, "测试电脑")
+            self.assertEqual(len(self.service.list_assets(search_text="联想")), 1)
+            self.assertEqual(len(self.service.list_changes(created.asset_id)), 2)
+            self.assertEqual(len(self.service.list_storage_media(created.asset_id)), 1)
+            self.assertGreater(len(self.service.get_categories()), 0)
+            self.assertGreater(len(self.service.get_locations()), 0)
+            self.assertIn("采购", self.service.get_enum_values("取得方式"))
+            self.assertEqual(self.service.get_operator(), "管理员")
+
+    def test_service_initialization_loads_and_validates_workbook_once(self) -> None:
+        with patch.object(
+            self.repository,
+            "load_with_fingerprint",
+            wraps=self.repository.load_with_fingerprint,
+        ) as load, patch.object(
+            self.repository,
+            "validate_workbook",
+            side_effect=AssertionError("不应单独重复校验"),
+        ):
+            service = AssetService(self.repository)
+
+        self.assertEqual(load.call_count, 1)
+        self.assertFalse(service.cache_status.stale)
+
+    def test_query_results_are_copies_and_cannot_mutate_cache(self) -> None:
+        created = self.service.create_asset(sample_asset(), [sample_storage()])
+
+        asset = self.service.get_asset(created.asset_id)
+        medium = self.service.list_storage_media(created.asset_id)[0]
+        change = self.service.list_changes(created.asset_id)[0]
+        category = self.service.get_categories()[0]
+        asset.name = "未保存修改"
+        medium.serial_number = "未保存介质修改"
+        change.new_value = "未保存历史修改"
+        category.name = "未保存分类修改"
+
+        self.assertEqual(self.service.get_asset(created.asset_id).name, "测试电脑")
+        self.assertEqual(
+            self.service.list_storage_media(created.asset_id)[0].serial_number,
+            "SSD-SN-001",
+        )
+        self.assertNotEqual(
+            self.service.list_changes(created.asset_id)[0].new_value,
+            "未保存历史修改",
+        )
+        self.assertNotEqual(self.service.get_categories()[0].name, "未保存分类修改")
+
+    def test_external_workbook_change_blocks_write_until_reload(self) -> None:
+        self.service.create_asset(sample_asset())
+        backups_before = list((self.path.parent / "backups").glob("assets-*.xlsx"))
+        workbook = self.repository.load()
+        workbook["系统配置"]["B4"] = "外部修改"
+        self.repository.save(workbook, create_backup=False)
+        workbook.close()
+
+        with self.assertRaises(WorkbookChangedExternallyError):
+            self.service.create_asset(
+                sample_asset(equipment_code="EQ-002", serial_number="SN-002")
+            )
+
+        self.assertEqual(
+            list((self.path.parent / "backups").glob("assets-*.xlsx")),
+            backups_before,
+        )
+        self.assertEqual(len(self.service.list_assets()), 1)
+        self.service.reload_cache()
+        created = self.service.create_asset(
+            sample_asset(equipment_code="EQ-002", serial_number="SN-002")
+        )
+        self.assertEqual(created.equipment_code, "EQ-002")
+
+    def test_failed_manual_reload_keeps_old_cache_and_blocks_writes(self) -> None:
+        created = self.service.create_asset(sample_asset())
+        original_bytes = self.path.read_bytes()
+        self.path.write_text("not an xlsx", encoding="utf-8")
+
+        with self.assertRaises(Exception):
+            self.service.reload_cache()
+
+        self.assertTrue(self.service.cache_status.stale)
+        self.assertEqual(self.service.get_asset(created.asset_id).name, "测试电脑")
+        with self.assertRaises(CacheUnavailableError):
+            self.service.create_asset(
+                sample_asset(equipment_code="EQ-002", serial_number="SN-002")
+            )
+        self.path.write_bytes(original_bytes)
+        self.service.reload_cache()
+        self.assertFalse(self.service.cache_status.stale)
+
+    def test_save_success_followed_by_cache_reload_failure_blocks_more_writes(self) -> None:
+        original_reload = self.service.reload_cache
+        with patch.object(
+            self.service, "reload_cache", side_effect=RuntimeError("缓存读取失败")
+        ):
+            with self.assertRaises(CacheReloadAfterSaveError):
+                self.service.create_asset(sample_asset())
+
+        self.assertTrue(self.service.cache_status.stale)
+        with self.assertRaises(CacheUnavailableError):
+            self.service.create_asset(
+                sample_asset(equipment_code="EQ-002", serial_number="SN-002")
+            )
+        original_reload()
+        self.assertEqual(len(self.service.list_assets()), 1)
+
+    def test_failed_save_keeps_workbook_and_cache_unchanged(self) -> None:
+        first = self.service.create_asset(sample_asset())
+
+        with patch.object(self.repository, "save", side_effect=RuntimeError("写入失败")):
+            with self.assertRaisesRegex(RuntimeError, "写入失败"):
+                self.service.create_asset(
+                    sample_asset(equipment_code="EQ-002", serial_number="SN-002")
+                )
+
+        self.assertFalse(self.service.cache_status.stale)
+        self.assertEqual([asset.asset_id for asset in self.service.list_assets()], [first.asset_id])
+        workbook = self.repository.load(data_only=True)
+        rows = [
+            row
+            for row in workbook["资产台账"].iter_rows(min_row=2, values_only=True)
+            if row[0]
+        ]
+        workbook.close()
+        self.assertEqual(len(rows), 1)
+
+    def test_no_change_update_does_not_backup_or_reload_cache(self) -> None:
+        created = self.service.create_asset(sample_asset())
+        backups_before = list((self.path.parent / "backups").glob("assets-*.xlsx"))
+
+        with patch.object(self.service, "reload_cache", wraps=self.service.reload_cache) as reload:
+            self.service.update_asset(created.asset_id, sample_asset())
+
+        self.assertEqual(reload.call_count, 0)
+        self.assertEqual(
+            list((self.path.parent / "backups").glob("assets-*.xlsx")),
+            backups_before,
+        )
 
     def test_create_asset_rejects_duplicate_equipment_code(self) -> None:
         self.service.create_asset(sample_asset())
@@ -195,6 +345,7 @@ class AssetServiceTests(unittest.TestCase):
                 row[1].value = "1"
         self.repository.save(workbook, create_backup=False)
         workbook.close()
+        self.service.reload_cache()
 
         second = self.service.create_asset(
             sample_asset(equipment_code="EQ-002", serial_number="SN-002")
@@ -362,6 +513,7 @@ class AssetServiceTests(unittest.TestCase):
             )
         self.repository.save(workbook, create_backup=False)
         workbook.close()
+        self.service.reload_cache()
 
         started = perf_counter()
         assets = self.service.list_assets()
@@ -369,6 +521,29 @@ class AssetServiceTests(unittest.TestCase):
 
         self.assertEqual(len(assets), 2000)
         self.assertLess(elapsed, 5)
+
+    def test_searches_five_thousand_cached_assets_within_half_second(self) -> None:
+        workbook = self.repository.load()
+        sheet = workbook["资产台账"]
+        for index in range(5000):
+            sheet.append(
+                [
+                    f"AST-2026-{index + 1:06d}",
+                    f"EQ-{index + 1:05d}",
+                    f"设备 {index + 1}",
+                    *([""] * 25),
+                ]
+            )
+        self.repository.save(workbook, create_backup=False)
+        workbook.close()
+        self.service.reload_cache()
+
+        started = perf_counter()
+        assets = self.service.list_assets(search_text="设备 5000")
+        elapsed = perf_counter() - started
+
+        self.assertEqual(len(assets), 1)
+        self.assertLess(elapsed, 0.5)
 
 
 if __name__ == "__main__":

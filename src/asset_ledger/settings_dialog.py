@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .asset_service import AssetService, AssetServiceError
+from .asset_service import AssetService
 from .excel_repository import CATEGORY_SHEET, LOCATION_SHEET
 
 
@@ -171,7 +171,7 @@ class SettingsDialog(QDialog):
         try:
             self.service.add_dictionary_item(sheet_name, name, parent_id=parent_id)
             self._refresh_tree(sheet_name, tree)
-        except AssetServiceError as exc:
+        except Exception as exc:
             QMessageBox.warning(self, "无法新增", str(exc))
 
     def _toggle_dictionary(self, sheet_name: str, tree: QTreeWidget) -> None:
@@ -180,8 +180,11 @@ class SettingsDialog(QDialog):
             return
         item_id = str(selected.data(0, Qt.ItemDataRole.UserRole))
         enabled = bool(selected.data(0, Qt.ItemDataRole.UserRole + 1))
-        self.service.set_dictionary_item_enabled(sheet_name, item_id, not enabled)
-        self._refresh_tree(sheet_name, tree)
+        try:
+            self.service.set_dictionary_item_enabled(sheet_name, item_id, not enabled)
+            self._refresh_tree(sheet_name, tree)
+        except Exception as exc:
+            QMessageBox.warning(self, "无法修改", str(exc))
 
     def _refresh_tree(self, sheet_name: str, tree: QTreeWidget) -> None:
         items = (
@@ -196,9 +199,12 @@ class SettingsDialog(QDialog):
         if accepted and value.strip():
             values = [widget.item(index).text() for index in range(widget.count())]
             values.append(value.strip())
-            self.service.set_enum_values(enum_type, values)
-            widget.clear()
-            widget.addItems(self.service.get_enum_values(enum_type))
+            try:
+                self.service.set_enum_values(enum_type, values)
+                widget.clear()
+                widget.addItems(self.service.get_enum_values(enum_type))
+            except Exception as exc:
+                QMessageBox.warning(self, "无法新增", str(exc))
 
     def _remove_enum(self, enum_type: str, widget: QListWidget) -> None:
         row = widget.currentRow()
@@ -211,7 +217,7 @@ class SettingsDialog(QDialog):
             self.service.set_enum_values(enum_type, values)
             widget.clear()
             widget.addItems(values)
-        except AssetServiceError as exc:
+        except Exception as exc:
             QMessageBox.warning(self, "无法移除", str(exc))
 
     def _choose_path(self) -> None:
@@ -227,5 +233,10 @@ class SettingsDialog(QDialog):
             self.path_edit.setText(str(self.selected_path))
 
     def _save_general(self) -> None:
-        self.service.set_operator(self.operator_edit.text())
+        try:
+            if self.selected_path == self.workbook_path:
+                self.service.set_operator(self.operator_edit.text())
+        except Exception as exc:
+            QMessageBox.warning(self, "无法保存设置", str(exc))
+            return
         self.accept()

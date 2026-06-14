@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
 import shutil
 import tempfile
@@ -182,6 +184,17 @@ class WorkbookLockedError(PermissionError):
     pass
 
 
+class WorkbookChangedExternallyError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class WorkbookFingerprint:
+    size: int
+    mtime_ns: int
+    sha256: str
+
+
 class ExcelRepository:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -216,6 +229,13 @@ class ExcelRepository:
         except Exception as exc:
             return [f"无法读取工作簿：{exc}"]
 
+        try:
+            return self.validate_loaded_workbook(workbook)
+        finally:
+            workbook.close()
+
+    @staticmethod
+    def validate_loaded_workbook(workbook) -> list[str]:
         errors: list[str] = []
         expected_headers = {
             ASSET_SHEET: ASSET_HEADERS,
@@ -234,9 +254,9 @@ class ExcelRepository:
             if actual != expected_headers[sheet_name]:
                 errors.append(f"工作表字段不正确：{sheet_name}")
 
+        ids: set[str] = set()
+        codes: set[str] = set()
         if ASSET_SHEET in workbook.sheetnames:
-            ids: set[str] = set()
-            codes: set[str] = set()
             for row_number, row in enumerate(
                 workbook[ASSET_SHEET].iter_rows(min_row=2, values_only=True), start=2
             ):
@@ -274,7 +294,6 @@ class ExcelRepository:
                     errors.append(f"存储介质关联资产不存在：第{row_number}行")
                 if storage_id:
                     storage_ids.add(storage_id)
-        workbook.close()
         return errors
 
     def _migrate_if_needed(self) -> None:
@@ -374,9 +393,73 @@ class ExcelRepository:
         if errors:
             raise WorkbookValidationError("\n".join(errors))
 
-    def load(self, *, data_only: bool = False):
-        self.require_valid()
-        return load_workbook(self.path, data_only=data_only)
+    def fingerprint(self) -> WorkbookFingerprint:
+        try:
+            stat = self.path.stat()
+            digest = sha256()
+            with self.path.open("rb") as workbook_file:
+                for block in iter(lambda: workbook_file.read(1024 * 1024), b""):
+                    digest.update(block)
+        except FileNotFoundError as exc:
+            raise WorkbookValidationError("工作簿不存在") from exc
+        except OSError as exc:
+            raise WorkbookValidationError(f"无法读取工作簿：{exc}") from exc
+        return WorkbookFingerprint(stat.st_size, stat.st_mtime_ns, digest.hexdigest())
+
+    def assert_unchanged(self, expected: WorkbookFingerprint) -> None:
+        try:
+            current = self.fingerprint()
+        except WorkbookValidationError as exc:
+            raise WorkbookChangedExternallyError(
+                "Excel 工作簿已被移动、删除或修改，请先刷新后重试。"
+            ) from exc
+        if current != expected:
+            raise WorkbookChangedExternallyError(
+                "Excel 工作簿已被其他程序修改，请先刷新后重新确认本次操作。"
+            )
+
+    def load(
+        self,
+        *,
+        data_only: bool = False,
+        expected_fingerprint: WorkbookFingerprint | None = None,
+    ):
+        workbook, _ = self.load_with_fingerprint(
+            data_only=data_only,
+            expected_fingerprint=expected_fingerprint,
+        )
+        return workbook
+
+    def load_with_fingerprint(
+        self,
+        *,
+        data_only: bool = False,
+        expected_fingerprint: WorkbookFingerprint | None = None,
+    ):
+        before = self.fingerprint()
+        if expected_fingerprint is not None and before != expected_fingerprint:
+            raise WorkbookChangedExternallyError(
+                "Excel 工作簿已被其他程序修改，请先刷新后重新确认本次操作。"
+            )
+        try:
+            workbook = load_workbook(self.path, data_only=data_only)
+        except Exception as exc:
+            raise WorkbookValidationError(f"无法读取工作簿：{exc}") from exc
+        errors = self.validate_loaded_workbook(workbook)
+        if errors:
+            workbook.close()
+            raise WorkbookValidationError("\n".join(errors))
+        try:
+            after = self.fingerprint()
+        except Exception:
+            workbook.close()
+            raise
+        if before != after:
+            workbook.close()
+            raise WorkbookChangedExternallyError(
+                "读取期间 Excel 工作簿发生变化，请重新刷新。"
+            )
+        return workbook, after
 
     def backup_workbook(self) -> Path | None:
         if not self.path.exists():
@@ -388,13 +471,32 @@ class ExcelRepository:
         shutil.copy2(self.path, backup_path)
         return backup_path
 
-    def save(self, workbook, *, create_backup: bool = True) -> None:
+    def save(
+        self,
+        workbook,
+        *,
+        create_backup: bool = True,
+        expected_fingerprint: WorkbookFingerprint | None = None,
+    ) -> WorkbookFingerprint:
+        if expected_fingerprint is not None:
+            self.assert_unchanged(expected_fingerprint)
         self._assert_not_locked()
         if create_backup:
             self.backup_workbook()
-        self._save_atomic(workbook, create_backup=False)
+        self._save_atomic(
+            workbook,
+            create_backup=False,
+            expected_fingerprint=expected_fingerprint,
+        )
+        return self.fingerprint()
 
-    def _save_atomic(self, workbook, *, create_backup: bool = False) -> None:
+    def _save_atomic(
+        self,
+        workbook,
+        *,
+        create_backup: bool = False,
+        expected_fingerprint: WorkbookFingerprint | None = None,
+    ) -> None:
         if create_backup:
             self.backup_workbook()
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -405,6 +507,8 @@ class ExcelRepository:
             ) as temporary_file:
                 temporary_path = Path(temporary_file.name)
             workbook.save(temporary_path)
+            if expected_fingerprint is not None:
+                self.assert_unchanged(expected_fingerprint)
             temporary_path.replace(self.path)
         except PermissionError as exc:
             raise WorkbookLockedError("Excel 文件正在被占用，无法保存。") from exc

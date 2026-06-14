@@ -3,7 +3,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from asset_ledger.app import application_base_dir, default_workbook_path
+from asset_ledger.app import application_base_dir, default_workbook_path, resource_path
 
 
 class AppPathTests(unittest.TestCase):
@@ -27,6 +27,9 @@ class AppPathTests(unittest.TestCase):
                 default_workbook_path(),
                 executable.parent / "data" / "设备资产台账.xlsx",
             )
+
+    def test_source_application_icon_exists_at_resource_path(self) -> None:
+        self.assertTrue(resource_path("assets/app_icon.ico").exists())
 
 
 if __name__ == "__main__":

@@ -2,14 +2,15 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from asset_ledger.asset_dialog import AssetDialog
-from asset_ledger.asset_service import AssetService
+from asset_ledger.asset_service import AssetService, CacheReloadAfterSaveError
 from asset_ledger.excel_repository import ExcelRepository
 from asset_ledger.main_window import MainWindow
 from asset_ledger.settings_dialog import SettingsDialog
@@ -195,6 +196,44 @@ class GuiTests(unittest.TestCase):
         self.assertIn("最近刷新", window.result_label.text())
         window.close()
 
+    def test_manual_refresh_reloads_cache_but_save_refresh_only_redraws(self) -> None:
+        asset = self.service.create_asset(sample_asset())
+        window = MainWindow(self.service, self.path)
+
+        with patch.object(
+            self.service, "reload_cache", wraps=self.service.reload_cache
+        ) as reload:
+            window.refresh_all()
+            window.refresh_after_save(asset.asset_id)
+
+        self.assertEqual(reload.call_count, 1)
+        window.close()
+
+    def test_failed_manual_refresh_keeps_current_table_visible(self) -> None:
+        self.service.create_asset(sample_asset())
+        window = MainWindow(self.service, self.path)
+
+        with patch.object(
+            self.service, "reload_cache", side_effect=RuntimeError("刷新失败")
+        ), patch.object(QMessageBox, "critical") as critical:
+            window.refresh_all()
+
+        self.assertEqual(window.asset_table.rowCount(), 1)
+        critical.assert_called_once()
+        window.close()
+
+    def test_cache_reload_after_save_error_uses_non_retrying_warning_title(self) -> None:
+        window = MainWindow(self.service, self.path)
+
+        with patch.object(QMessageBox, "critical") as critical:
+            window._show_write_error(
+                "新增失败",
+                CacheReloadAfterSaveError("Excel 已保存，但缓存刷新失败"),
+            )
+
+        self.assertEqual(critical.call_args.args[1], "Excel 已保存，请勿重复操作")
+        window.close()
+
     def test_refresh_preserves_unassigned_owner_filter(self) -> None:
         self.service.create_asset(sample_asset())
         self.service.create_asset(
@@ -325,6 +364,29 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(dialog.operator_edit.text(), "管理员")
         self.assertEqual(dialog.tabs.count(), 4)
         self.assertGreater(dialog.category_tree.topLevelItemCount(), 0)
+
+    def test_settings_dialog_does_not_write_operator_to_old_workbook_when_switching(self) -> None:
+        dialog = SettingsDialog(self.service, self.path)
+        dialog.selected_path = self.path.parent / "other.xlsx"
+        dialog.operator_edit.setText("新操作者")
+
+        with patch.object(self.service, "set_operator") as set_operator:
+            dialog._save_general()
+
+        set_operator.assert_not_called()
+
+    def test_settings_dialog_keeps_open_when_operator_save_fails(self) -> None:
+        dialog = SettingsDialog(self.service, self.path)
+
+        with patch.object(
+            self.service, "set_operator", side_effect=RuntimeError("外部修改冲突")
+        ), patch.object(dialog, "accept") as accept, patch.object(
+            QMessageBox, "warning"
+        ) as warning:
+            dialog._save_general()
+
+        accept.assert_not_called()
+        warning.assert_called_once()
 
 
 if __name__ == "__main__":

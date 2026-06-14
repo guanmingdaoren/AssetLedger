@@ -29,8 +29,8 @@ from PySide6.QtWidgets import (
 )
 
 from .asset_dialog import AssetDialog
-from .asset_service import AssetService
-from .excel_repository import ExcelRepository
+from .asset_service import AssetService, CacheReloadAfterSaveError, CacheUnavailableError
+from .excel_repository import ExcelRepository, WorkbookChangedExternallyError
 from .models import Asset
 from .settings_dialog import SettingsDialog
 from .widgets import NoWheelComboBox
@@ -250,8 +250,19 @@ class MainWindow(QMainWindow):
         combo.addItem(all_text, "")
         return combo
 
-    def refresh_all(self) -> None:
+    def refresh_all(self, *_args, reload_cache: bool = True) -> None:
         selected_asset_id = self._selected_asset_id()
+        if reload_cache:
+            try:
+                self.service.reload_cache()
+            except Exception as exc:
+                self.statusBar().showMessage("刷新失败，当前显示仍为上次有效缓存")
+                QMessageBox.critical(
+                    self,
+                    "刷新失败",
+                    f"{exc}\n\n当前画面仍显示上次成功加载的数据，保存功能已被禁用。",
+                )
+                return
         self.refresh_filters()
         self.refresh_assets()
         if selected_asset_id:
@@ -501,11 +512,11 @@ class MainWindow(QMainWindow):
             created = self.service.create_asset(
                 dialog.asset_data(), dialog.storage_media_data(), dialog.change_note()
             )
-            self.refresh_all()
+            self.refresh_all(reload_cache=False)
             self._select_asset(created.asset_id)
             self.statusBar().showMessage(f"已新增 {created.name}", 5000)
         except Exception as exc:
-            QMessageBox.critical(self, "新增失败", str(exc))
+            self._show_write_error("新增失败", exc)
 
     def edit_selected_asset(self, *_args) -> None:
         asset = self._selected_asset()
@@ -525,25 +536,26 @@ class MainWindow(QMainWindow):
             self.refresh_after_save(updated.asset_id)
             self.statusBar().showMessage(f"已更新 {updated.name}", 5000)
         except Exception as exc:
-            QMessageBox.critical(self, "保存失败", str(exc))
+            self._show_write_error("保存失败", exc)
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(self.service, self.workbook_path, self)
         if dialog.exec() != SettingsDialog.DialogCode.Accepted:
             return
         if dialog.selected_path != self.workbook_path:
-            repository = ExcelRepository(dialog.selected_path)
-            repository.initialize()
-            errors = repository.validate_workbook()
-            if errors:
-                QMessageBox.critical(self, "工作簿无效", "\n".join(errors))
+            try:
+                repository = ExcelRepository(dialog.selected_path)
+                repository.initialize()
+                new_service = AssetService(repository)
+                new_service.set_operator(dialog.operator_edit.text())
+            except Exception as exc:
+                QMessageBox.critical(self, "无法切换工作簿", str(exc))
                 return
             self.workbook_path = dialog.selected_path
-            self.service = AssetService(repository)
-            self.service.set_operator(dialog.operator_edit.text())
+            self.service = new_service
             self.path_label.setText(str(self.workbook_path))
             self.workbook_changed.emit(self.workbook_path)
-        self.refresh_all()
+        self.refresh_all(reload_cache=False)
 
     def clear_filters(self) -> None:
         for combo in (
@@ -642,8 +654,22 @@ class MainWindow(QMainWindow):
             iterator += 1
 
     def _update_refresh_label(self) -> None:
-        self.last_refresh_time = datetime.now().strftime("%H:%M:%S")
+        loaded_at = self.service.cache_status.loaded_at
+        self.last_refresh_time = loaded_at.split(" ")[-1] if loaded_at else ""
         self._show_result_label()
+        if self.service.cache_status.stale:
+            self.statusBar().showMessage("缓存已过期，保存功能已禁用，请点击刷新")
+        else:
+            self.statusBar().showMessage(f"缓存已加载：{loaded_at}")
+
+    def _show_write_error(self, default_title: str, error: Exception) -> None:
+        if isinstance(error, CacheReloadAfterSaveError):
+            title = "Excel 已保存，请勿重复操作"
+        elif isinstance(error, (WorkbookChangedExternallyError, CacheUnavailableError)):
+            title = "数据已变化，无法保存"
+        else:
+            title = default_title
+        QMessageBox.critical(self, title, str(error))
 
     def _show_result_label(self) -> None:
         refresh_text = (

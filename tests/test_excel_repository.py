@@ -17,6 +17,8 @@ from asset_ledger.excel_repository import (
     ExcelRepository,
     LOCATION_HEADERS,
     STORAGE_HEADERS,
+    WorkbookChangedExternallyError,
+    WorkbookValidationError,
     WorkbookLockedError,
 )
 
@@ -172,6 +174,24 @@ class ExcelRepositoryTests(unittest.TestCase):
 
             self.assertIn("缺少工作表：变更历史", errors)
 
+    def test_validate_workbook_reports_missing_asset_sheet_without_crashing(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "assets.xlsx"
+            repository = ExcelRepository(path)
+            repository.initialize()
+
+            workbook = load_workbook(path)
+            workbook["存储介质"].append(
+                ["MED-1", "AST-2026-000001", "SSD", "", "", 512, "GB"]
+            )
+            del workbook["资产台账"]
+            workbook.save(path)
+            workbook.close()
+
+            errors = repository.validate_workbook()
+
+            self.assertIn("缺少工作表：资产台账", errors)
+
     def test_validate_workbook_reports_wrong_headers_and_duplicate_ids(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "assets.xlsx"
@@ -218,6 +238,80 @@ class ExcelRepositoryTests(unittest.TestCase):
                 with self.assertRaises(WorkbookLockedError):
                     repository.save(workbook, create_backup=False)
             workbook.close()
+
+    def test_fingerprint_detects_external_workbook_change_before_save(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "assets.xlsx"
+            repository = ExcelRepository(path)
+            repository.initialize()
+            expected = repository.fingerprint()
+            workbook = repository.load()
+
+            external = load_workbook(path)
+            external["系统配置"]["B4"] = "外部修改"
+            external.save(path)
+            external.close()
+
+            with self.assertRaises(WorkbookChangedExternallyError):
+                repository.save(
+                    workbook,
+                    create_backup=False,
+                    expected_fingerprint=expected,
+                )
+            workbook.close()
+
+            saved = load_workbook(path, read_only=True, data_only=True)
+            self.assertEqual(saved["系统配置"]["B4"].value, "外部修改")
+            saved.close()
+
+    def test_external_change_during_temporary_save_is_not_overwritten(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "assets.xlsx"
+            repository = ExcelRepository(path)
+            repository.initialize()
+            expected = repository.fingerprint()
+            workbook = repository.load()
+            original_save = workbook.save
+
+            def save_then_modify_external_file(temporary_path) -> None:
+                original_save(temporary_path)
+                external = load_workbook(path)
+                external["系统配置"]["B4"] = "保存期间外部修改"
+                external.save(path)
+                external.close()
+
+            with patch.object(workbook, "save", side_effect=save_then_modify_external_file):
+                with self.assertRaises(WorkbookChangedExternallyError):
+                    repository.save(
+                        workbook,
+                        create_backup=False,
+                        expected_fingerprint=expected,
+                    )
+            workbook.close()
+
+            saved = load_workbook(path, read_only=True, data_only=True)
+            self.assertEqual(saved["系统配置"]["B4"].value, "保存期间外部修改")
+            saved.close()
+
+    def test_failed_consistent_load_closes_open_workbook(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "assets.xlsx"
+            repository = ExcelRepository(path)
+            repository.initialize()
+            expected = repository.fingerprint()
+            workbook = load_workbook(path)
+
+            with patch(
+                "asset_ledger.excel_repository.load_workbook", return_value=workbook
+            ), patch.object(
+                repository,
+                "fingerprint",
+                side_effect=[expected, WorkbookValidationError("读取后文件消失")],
+            ), patch.object(workbook, "close", wraps=workbook.close) as close:
+                with self.assertRaisesRegex(WorkbookValidationError, "读取后文件消失"):
+                    repository.load_with_fingerprint()
+
+            close.assert_called_once()
 
 
 if __name__ == "__main__":
