@@ -35,15 +35,17 @@ class GuiTests(unittest.TestCase):
         self.temporary_directory.cleanup()
 
     def test_asset_dialog_round_trips_asset_data(self) -> None:
-        asset = self.service.create_asset(sample_asset())
+        asset = self.service.create_asset(sample_asset(asset_identifier="ZC-GUI-001"))
 
         dialog = AssetDialog(self.service, asset)
         result = dialog.asset_data()
 
         self.assertEqual(result["equipment_code"], "EQ-001")
+        self.assertEqual(result["asset_identifier"], "ZC-GUI-001")
         self.assertEqual(result["name"], "测试电脑")
         self.assertEqual(result["price"], 5999.0)
         self.assertFalse(dialog.asset_id_edit.isEnabled())
+        self.assertEqual(dialog.asset_identifier_edit.text(), "ZC-GUI-001")
 
     def test_asset_dialog_uses_editable_department_and_owner_suggestions(self) -> None:
         asset = self.service.create_asset(sample_asset())
@@ -82,6 +84,7 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(dialog.source_combo.currentText(), "")
         self.assertEqual(dialog.status_combo.currentText(), "")
         self.assertEqual(dialog.equipment_code_edit.text(), "")
+        self.assertEqual(dialog.asset_identifier_edit.text(), "")
 
     def test_asset_dialog_loads_storage_media_table(self) -> None:
         asset = self.service.create_asset(sample_asset(), [sample_storage()])
@@ -109,7 +112,7 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(spin.value(), 10)
 
     def test_main_window_loads_asset_table_and_detail_tabs(self) -> None:
-        self.service.create_asset(sample_asset())
+        self.service.create_asset(sample_asset(asset_identifier="ZC-MAIN-001"))
 
         window = MainWindow(self.service, self.path)
         window.refresh_assets()
@@ -117,8 +120,11 @@ class GuiTests(unittest.TestCase):
         self.application.processEvents()
 
         self.assertEqual(window.asset_table.rowCount(), 1)
+        self.assertEqual(window.asset_table.horizontalHeaderItem(0).text(), "资产UID")
+        self.assertEqual(window.asset_table.horizontalHeaderItem(2).text(), "资产唯一标识符")
         self.assertEqual(window.detail_tabs.count(), 2)
         self.assertIn("AST-", window.detail_text.toPlainText())
+        self.assertIn("ZC-MAIN-001", window.detail_text.toPlainText())
         self.assertIn("最近刷新", window.result_label.text())
         window.close()
 

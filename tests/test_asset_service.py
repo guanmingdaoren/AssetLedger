@@ -12,6 +12,7 @@ from asset_ledger.asset_service import (
     DuplicateEquipmentCodeError,
 )
 from asset_ledger.excel_repository import (
+    ASSET_HEADERS,
     ExcelRepository,
     WorkbookChangedExternallyError,
 )
@@ -20,6 +21,7 @@ from asset_ledger.excel_repository import (
 def sample_asset(**overrides):
     asset = {
         "equipment_code": "EQ-001",
+        "asset_identifier": "",
         "name": "测试电脑",
         "primary_category": "IT 与通信设备",
         "secondary_category": "电脑",
@@ -76,10 +78,11 @@ class AssetServiceTests(unittest.TestCase):
         self.temporary_directory.cleanup()
 
     def test_create_asset_generates_id_and_creation_history(self) -> None:
-        created = self.service.create_asset(sample_asset())
+        created = self.service.create_asset(sample_asset(asset_identifier="ZC-001"))
 
         self.assertRegex(created.asset_id, r"^AST-\d{4}-000001$")
         self.assertEqual(created.equipment_code, "EQ-001")
+        self.assertEqual(created.asset_identifier, "ZC-001")
         changes = self.service.list_changes(created.asset_id)
         self.assertEqual(len(changes), 1)
         self.assertEqual(changes[0].event_type, "新建设备")
@@ -235,6 +238,31 @@ class AssetServiceTests(unittest.TestCase):
         with self.assertRaises(DuplicateEquipmentCodeError):
             self.service.create_asset(sample_asset(name="另一台电脑"))
 
+    def test_asset_identifier_saves_searches_and_requires_unique_when_present(self) -> None:
+        first = self.service.create_asset(sample_asset(asset_identifier="ZC-UNIQUE-001"))
+
+        searched = self.service.list_assets(search_text="ZC-UNIQUE-001")
+
+        self.assertEqual(first.asset_identifier, "ZC-UNIQUE-001")
+        self.assertEqual([asset.asset_id for asset in searched], [first.asset_id])
+        with self.assertRaisesRegex(AssetServiceError, "资产唯一标识符已存在"):
+            self.service.create_asset(
+                sample_asset(
+                    equipment_code="EQ-002",
+                    serial_number="SN-002",
+                    asset_identifier="ZC-UNIQUE-001",
+                )
+            )
+        second = self.service.create_asset(
+            sample_asset(
+                equipment_code="EQ-002",
+                serial_number="SN-002",
+                name="未登记标识符设备",
+                asset_identifier="",
+            )
+        )
+        self.assertEqual(second.asset_identifier, "")
+
     def test_create_asset_allows_blank_code_but_requires_name(self) -> None:
         first = self.service.create_asset(sample_asset(equipment_code=""))
         second = self.service.create_asset(
@@ -357,15 +385,21 @@ class AssetServiceTests(unittest.TestCase):
     def test_update_asset_records_changed_fields_in_one_event_group(self) -> None:
         created = self.service.create_asset(sample_asset())
 
-        updated_data = sample_asset(status="维修", location="仓库", price=5200.0)
+        updated_data = sample_asset(
+            status="维修",
+            location="仓库",
+            price=5200.0,
+            asset_identifier="ZC-UPDATED-001",
+        )
         updated = self.service.update_asset(created.asset_id, updated_data, "送修并转入仓库")
 
         self.assertEqual(updated.status, "维修")
+        self.assertEqual(updated.asset_identifier, "ZC-UPDATED-001")
         changes = self.service.list_changes(created.asset_id)
         updated_changes = [change for change in changes if change.event_type != "新建设备"]
         self.assertEqual(
             {change.field_name for change in updated_changes},
-            {"金额", "使用状态", "存放地点"},
+            {"资产唯一标识符", "金额", "使用状态", "存放地点"},
         )
         self.assertEqual(len({change.event_group_id for change in updated_changes}), 1)
         self.assertEqual({change.note for change in updated_changes}, {"送修并转入仓库"})
@@ -492,6 +526,7 @@ class AssetServiceTests(unittest.TestCase):
                 [
                     f"AST-2026-{index + 1:06d}",
                     f"EQ-{index + 1:05d}",
+                    "",
                     f"设备 {index + 1}",
                     "IT 与通信设备",
                     "电脑",
@@ -530,8 +565,9 @@ class AssetServiceTests(unittest.TestCase):
                 [
                     f"AST-2026-{index + 1:06d}",
                     f"EQ-{index + 1:05d}",
+                    "",
                     f"设备 {index + 1}",
-                    *([""] * 25),
+                    *([""] * (len(ASSET_HEADERS) - 4)),
                 ]
             )
         self.repository.save(workbook, create_backup=False)

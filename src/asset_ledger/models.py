@@ -9,6 +9,7 @@ from typing import Any
 class Asset:
     asset_id: str = ""
     equipment_code: str = ""
+    asset_identifier: str = ""
     name: str = ""
     primary_category: str = ""
     secondary_category: str = ""

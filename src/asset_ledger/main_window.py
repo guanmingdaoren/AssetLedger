@@ -47,8 +47,9 @@ STATUS_COLORS = {
 }
 
 TABLE_COLUMNS = [
-    ("asset_id", "资产唯一标识符"),
+    ("asset_id", "资产UID"),
     ("equipment_code", "bm编码"),
+    ("asset_identifier", "资产唯一标识符"),
     ("name", "设备器材"),
     ("secondary_category", "类别"),
     ("brand_model", "品牌 / 产品型号"),
@@ -161,7 +162,7 @@ class MainWindow(QMainWindow):
         toolbar = QHBoxLayout()
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText(
-            "搜索资产ID、bm编码、设备器材、品牌型号、厂家、人员或存储介质序列号"
+            "搜索资产UID、bm编码、资产唯一标识符、设备器材、品牌型号、厂家、人员或存储介质序列号"
         )
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.textChanged.connect(self.refresh_assets)
@@ -199,7 +200,7 @@ class MainWindow(QMainWindow):
         self.asset_table.verticalHeader().setVisible(False)
         self.asset_table.itemSelectionChanged.connect(self.show_selected_asset)
         self.asset_table.itemDoubleClicked.connect(self.edit_selected_asset)
-        widths = [155, 125, 150, 110, 150, 90, 110, 90, 90, 105, 145]
+        widths = [155, 125, 155, 150, 110, 150, 90, 110, 90, 90, 105, 145]
         for index, width in enumerate(widths):
             self.asset_table.setColumnWidth(index, width)
         layout.addWidget(self.asset_table, 1)
@@ -353,6 +354,7 @@ class MainWindow(QMainWindow):
             values = [
                 asset.asset_id,
                 asset.equipment_code,
+                asset.asset_identifier,
                 asset.name,
                 asset.secondary_category or asset.primary_category,
                 " / ".join(value for value in (asset.brand, asset.model) if value),
@@ -366,10 +368,10 @@ class MainWindow(QMainWindow):
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 item.setData(Qt.ItemDataRole.UserRole, asset.asset_id)
-                if column == 5:
+                if column == 6:
                     item.setBackground(QColor(STATUS_COLORS.get(asset.status, "#FFFFFF")))
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if column == 9:
+                if column == 10:
                     item.setTextAlignment(
                         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
                     )
@@ -390,8 +392,9 @@ class MainWindow(QMainWindow):
         if not asset:
             return
         fields = [
-            ("资产唯一标识符", asset.asset_id),
+            ("资产UID", asset.asset_id),
             ("bm编码", asset.equipment_code),
+            ("资产唯一标识符", asset.asset_identifier),
             ("设备器材", asset.name),
             (
                 "设备分类",

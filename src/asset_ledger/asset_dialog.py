@@ -150,6 +150,7 @@ class AssetDialog(QDialog):
         self.asset_id_edit.setEnabled(False)
         self.asset_id_edit.setPlaceholderText("保存后自动生成")
         self.equipment_code_edit = QLineEdit()
+        self.asset_identifier_edit = QLineEdit()
         self.name_edit = QLineEdit()
         self.primary_category_combo = self._choice_combo()
         self.secondary_category_combo = self._choice_combo()
@@ -232,8 +233,9 @@ class AssetDialog(QDialog):
             self._group(
                 "身份与分类信息",
                 [
-                    ("资产唯一标识符", self.asset_id_edit),
+                    ("资产UID", self.asset_id_edit),
                     ("bm编码", self.equipment_code_edit),
+                    ("资产唯一标识符", self.asset_identifier_edit),
                     ("设备器材 *", self.name_edit),
                     ("一级类别", self.primary_category_combo),
                     ("二级类别", self.secondary_category_combo),
@@ -369,6 +371,7 @@ class AssetDialog(QDialog):
         for widget, value in (
             (self.asset_id_edit, asset.asset_id),
             (self.equipment_code_edit, asset.equipment_code),
+            (self.asset_identifier_edit, asset.asset_identifier),
             (self.name_edit, asset.name),
             (self.product_spec_edit, asset.product_spec),
             (self.model_edit, asset.model),
@@ -452,6 +455,7 @@ class AssetDialog(QDialog):
         return {
             "asset_id": self.asset_id_edit.text().strip(),
             "equipment_code": self.equipment_code_edit.text().strip(),
+            "asset_identifier": self.asset_identifier_edit.text().strip(),
             "name": self.name_edit.text().strip(),
             "primary_category": self.primary_category_combo.currentText(),
             "secondary_category": self.secondary_category_combo.currentText(),

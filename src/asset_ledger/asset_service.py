@@ -46,8 +46,9 @@ class CacheReloadAfterSaveError(AssetServiceError):
 
 
 FIELD_TO_HEADER = {
-    "asset_id": "资产唯一标识符",
+    "asset_id": "资产UID",
     "equipment_code": "bm编码",
+    "asset_identifier": "资产唯一标识符",
     "name": "设备器材",
     "primary_category": "一级类别",
     "secondary_category": "二级类别",
@@ -84,7 +85,7 @@ EDITABLE_FIELDS = [
 
 STORAGE_FIELD_TO_HEADER = {
     "storage_id": "存储介质ID",
-    "asset_id": "资产唯一标识符",
+    "asset_id": "资产UID",
     "medium_type": "介质类型",
     "name": "名称/编号",
     "brand": "品牌",
@@ -144,6 +145,7 @@ class AssetService:
         searchable_fields = (
             "asset_id",
             "equipment_code",
+            "asset_identifier",
             "name",
             "product_spec",
             "brand",
@@ -190,6 +192,7 @@ class AssetService:
         try:
             asset_sheet = workbook[ASSET_SHEET]
             self._ensure_equipment_code_unique(asset_sheet, asset.equipment_code)
+            self._ensure_asset_identifier_unique(asset_sheet, asset.asset_identifier)
             asset.asset_id = self._next_asset_id(workbook)
             now = timestamp_now()
             asset.created_at = now
@@ -271,6 +274,9 @@ class AssetService:
             )
             self._ensure_equipment_code_unique(
                 sheet, candidate.equipment_code, excluded_asset_id=asset_id
+            )
+            self._ensure_asset_identifier_unique(
+                sheet, candidate.asset_identifier, excluded_asset_id=asset_id
             )
             candidate.asset_id = current.asset_id
             candidate.created_at = current.created_at
@@ -686,6 +692,20 @@ class AssetService:
         for row in sheet.iter_rows(min_row=2, values_only=True):
             if row[0] and str(row[0]) != excluded_asset_id and str(row[1]) == equipment_code:
                 raise DuplicateEquipmentCodeError(f"bm编码已存在：{equipment_code}")
+
+    @staticmethod
+    def _ensure_asset_identifier_unique(
+        sheet, asset_identifier: str, excluded_asset_id: str = ""
+    ) -> None:
+        if not asset_identifier.strip():
+            return
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            if (
+                row[0]
+                and str(row[0]) != excluded_asset_id
+                and str(row[2] or "") == asset_identifier
+            ):
+                raise AssetServiceError(f"资产唯一标识符已存在：{asset_identifier}")
 
     @staticmethod
     def _find_asset_row(sheet, asset_id: str) -> int | None:
