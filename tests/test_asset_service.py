@@ -13,7 +13,10 @@ from asset_ledger.asset_service import (
 )
 from asset_ledger.excel_repository import (
     ASSET_HEADERS,
+    CATEGORY_SHEET,
     ExcelRepository,
+    LOCATION_SHEET,
+    STORAGE_SHEET,
     WorkbookChangedExternallyError,
 )
 
@@ -25,6 +28,7 @@ def sample_asset(**overrides):
         "name": "测试电脑",
         "primary_category": "IT 与通信设备",
         "secondary_category": "电脑",
+        "category_path": "IT 与通信设备 / 电脑",
         "brand": "联想",
         "model": "T14",
         "serial_number": "SN-001",
@@ -46,14 +50,20 @@ def sample_asset(**overrides):
         "user": "李四",
         "label_printed": True,
         "notes": "初始设备",
+        "notes2": "",
     }
     asset.update(overrides)
+    if "category_path" not in overrides:
+        asset["category_path"] = " / ".join(
+            value for value in (asset["primary_category"], asset["secondary_category"]) if value
+        )
     return asset
 
 
 def sample_storage(**overrides):
     medium = {
         "medium_type": "SSD",
+        "status": "",
         "name": "系统盘",
         "brand": "三星",
         "capacity_value": 2,
@@ -263,6 +273,32 @@ class AssetServiceTests(unittest.TestCase):
         )
         self.assertEqual(second.asset_identifier, "")
 
+    def test_two_asset_notes_save_search_and_record_field_history(self) -> None:
+        created = self.service.create_asset(
+            sample_asset(notes="第一段备注", notes2="第二段备注")
+        )
+
+        self.assertEqual(created.notes, "第一段备注")
+        self.assertEqual(created.notes2, "第二段备注")
+        self.assertEqual(
+            [asset.asset_id for asset in self.service.list_assets(search_text="第二段备注")],
+            [created.asset_id],
+        )
+
+        self.service.update_asset(
+            created.asset_id,
+            sample_asset(notes="第一段备注已改", notes2="第二段备注已改"),
+            "整理备注",
+        )
+        changes = [
+            change
+            for change in self.service.list_changes(created.asset_id)
+            if change.field_name in {"备注1", "备注2"}
+        ]
+
+        self.assertEqual({change.field_name for change in changes}, {"备注1", "备注2"})
+        self.assertEqual({change.note for change in changes}, {"整理备注"})
+
     def test_create_asset_allows_blank_code_but_requires_name(self) -> None:
         first = self.service.create_asset(sample_asset(equipment_code=""))
         second = self.service.create_asset(
@@ -293,6 +329,60 @@ class AssetServiceTests(unittest.TestCase):
         self.assertEqual(len(media), 2)
         self.assertTrue(all(item.storage_id.startswith("MED-") for item in media))
         self.assertEqual({item.asset_id for item in media}, {created.asset_id})
+
+    def test_blank_storage_capacity_is_saved_as_empty_excel_cell(self) -> None:
+        self.service.create_asset(
+            sample_asset(),
+            [sample_storage(capacity_value=0, capacity_unit="")],
+        )
+
+        workbook = self.repository.load(data_only=True)
+        try:
+            sheet = workbook[STORAGE_SHEET]
+            headers = [cell.value for cell in sheet[1]]
+            row = next(sheet.iter_rows(min_row=2, values_only=True))
+        finally:
+            workbook.close()
+
+        self.assertIsNone(row[headers.index("容量数值")])
+
+    def test_category_path_supports_multi_level_assets_and_prefix_filter(self) -> None:
+        notebook = self.service.add_dictionary_item(
+            CATEGORY_SHEET, "笔记本电脑", parent_id="CAT-IT-PC"
+        )
+
+        created = self.service.create_asset(
+            sample_asset(
+                category_path="IT 与通信设备 / 电脑 / 笔记本电脑",
+                primary_category="IT 与通信设备",
+                secondary_category="电脑",
+            )
+        )
+        exact = self.service.list_assets(filters={"category_path": "IT 与通信设备 / 电脑 / 笔记本电脑"})
+        parent = self.service.list_assets(filters={"category_path": "IT 与通信设备 / 电脑"})
+
+        self.assertTrue(notebook.item_id.startswith("CAT-"))
+        self.assertEqual(created.category_path, "IT 与通信设备 / 电脑 / 笔记本电脑")
+        self.assertEqual([asset.asset_id for asset in exact], [created.asset_id])
+        self.assertEqual([asset.asset_id for asset in parent], [created.asset_id])
+
+    def test_delete_dictionary_item_allows_unused_leaf_and_rejects_used_or_parent(self) -> None:
+        unused = self.service.add_dictionary_item(LOCATION_SHEET, "临时库房")
+        used = self.service.add_dictionary_item(LOCATION_SHEET, "已用库房")
+        parent = self.service.add_dictionary_item(CATEGORY_SHEET, "测试父类")
+        self.service.add_dictionary_item(CATEGORY_SHEET, "测试子类", parent_id=parent.item_id)
+        self.service.create_asset(sample_asset(location="已用库房"))
+
+        self.service.delete_dictionary_item(LOCATION_SHEET, unused.item_id)
+
+        self.assertNotIn(
+            unused.item_id,
+            [item.item_id for item in self.service.get_locations(include_disabled=True)],
+        )
+        with self.assertRaisesRegex(AssetServiceError, "子项"):
+            self.service.delete_dictionary_item(CATEGORY_SHEET, parent.item_id)
+        with self.assertRaisesRegex(AssetServiceError, "已被设备使用"):
+            self.service.delete_dictionary_item(LOCATION_SHEET, used.item_id)
 
     def test_update_storage_media_records_add_modify_and_remove_history(self) -> None:
         created = self.service.create_asset(sample_asset(), [sample_storage()])
@@ -339,6 +429,36 @@ class AssetServiceTests(unittest.TestCase):
         self.assertIn("存储介质新增", event_types)
         self.assertIn("存储介质修改", event_types)
         self.assertIn("存储介质移除", event_types)
+
+    def test_storage_status_saves_searches_and_records_history(self) -> None:
+        created = self.service.create_asset(sample_asset(), [sample_storage(status="在用")])
+        original = self.service.list_storage_media(created.asset_id)[0]
+
+        self.service.update_asset(
+            created.asset_id,
+            sample_asset(),
+            [
+                {
+                    **sample_storage(status="报废", serial_number=original.serial_number),
+                    "storage_id": original.storage_id,
+                }
+            ],
+            "介质报废",
+        )
+
+        updated = self.service.list_storage_media(created.asset_id)[0]
+        searched = self.service.list_assets(search_text="报废")
+        storage_status_changes = [
+            change
+            for change in self.service.list_changes(created.asset_id)
+            if change.field_name == "存储介质-使用状态"
+        ]
+
+        self.assertEqual(updated.status, "报废")
+        self.assertEqual([asset.asset_id for asset in searched], [created.asset_id])
+        self.assertEqual(len(storage_status_changes), 1)
+        self.assertEqual(storage_status_changes[0].old_value, "在用")
+        self.assertEqual(storage_status_changes[0].new_value, "报废")
 
     def test_removing_all_storage_media_keeps_workbook_valid(self) -> None:
         created = self.service.create_asset(sample_asset(), [sample_storage()])

@@ -38,6 +38,7 @@ ASSET_HEADERS = [
     "设备器材",
     "一级类别",
     "二级类别",
+    "类别路径",
     "产品规格",
     "产品型号",
     "设备序列号",
@@ -58,7 +59,8 @@ ASSET_HEADERS = [
     "等级",
     "使用状态",
     "是否已打印标签",
-    "备注",
+    "备注1",
+    "备注2",
     "创建时间",
     "更新时间",
 ]
@@ -67,6 +69,7 @@ STORAGE_HEADERS = [
     "存储介质ID",
     "资产UID",
     "介质类型",
+    "使用状态",
     "名称/编号",
     "品牌",
     "容量数值",
@@ -134,7 +137,7 @@ DEFAULT_ENUMS = [
 ]
 
 DEFAULT_CONFIG = [
-    ("工作簿版本", "3", "用于识别工作簿结构"),
+    ("工作簿版本", "5", "用于识别工作簿结构"),
     ("下一个资产序号", "1", "生成资产 ID 使用"),
     ("默认操作者", "管理员", "记录变更时使用"),
 ]
@@ -161,7 +164,7 @@ V1_ASSET_HEADERS = [
     "更新时间",
 ]
 
-V1_TO_V3_HEADERS = {
+V1_TO_V4_HEADERS = {
     "资产ID": "资产UID",
     "装备编码": "bm编码",
     "设备名称": "设备器材",
@@ -174,6 +177,7 @@ V1_TO_V3_HEADERS = {
     "位置": "存放地点",
     "责任部门": "管理部门",
     "责任人": "管理人",
+    "备注": "备注1",
 }
 
 V2_ASSET_HEADERS = [
@@ -237,6 +241,7 @@ V2_CHANGE_HEADERS = [
 
 V2_TO_V3_ASSET_HEADERS = {
     "资产唯一标识符": "资产UID",
+    "备注": "备注1",
 }
 
 V2_TO_V3_STORAGE_HEADERS = {
@@ -249,7 +254,94 @@ V2_TO_V3_CHANGE_HEADERS = {
 
 V2_TO_V3_FIELD_NAMES = {
     "资产唯一标识符": "资产UID",
+    "备注": "备注1",
 }
+
+V3_ASSET_HEADERS = [
+    "资产UID",
+    "bm编码",
+    "资产唯一标识符",
+    "设备器材",
+    "一级类别",
+    "二级类别",
+    "产品规格",
+    "产品型号",
+    "设备序列号",
+    "生产厂家",
+    "供应商",
+    "品牌",
+    "取得方式",
+    "取得日期",
+    "启用日期",
+    "计价方式",
+    "金额",
+    "管理部门",
+    "管理人",
+    "使用部门",
+    "使用人",
+    "存放地点",
+    "出厂日期",
+    "等级",
+    "使用状态",
+    "是否已打印标签",
+    "备注",
+    "创建时间",
+    "更新时间",
+]
+
+V3_STORAGE_HEADERS = [
+    "存储介质ID",
+    "资产UID",
+    "介质类型",
+    "名称/编号",
+    "品牌",
+    "容量数值",
+    "容量单位",
+    "型号",
+    "序列号",
+    "备注",
+    "创建时间",
+    "更新时间",
+]
+
+V3_CHANGE_HEADERS = CHANGE_HEADERS.copy()
+
+V4_ASSET_HEADERS = [
+    "资产UID",
+    "bm编码",
+    "资产唯一标识符",
+    "设备器材",
+    "一级类别",
+    "二级类别",
+    "类别路径",
+    "产品规格",
+    "产品型号",
+    "设备序列号",
+    "生产厂家",
+    "供应商",
+    "品牌",
+    "取得方式",
+    "取得日期",
+    "启用日期",
+    "计价方式",
+    "金额",
+    "管理部门",
+    "管理人",
+    "使用部门",
+    "使用人",
+    "存放地点",
+    "出厂日期",
+    "等级",
+    "使用状态",
+    "是否已打印标签",
+    "备注",
+    "创建时间",
+    "更新时间",
+]
+
+V4_STORAGE_HEADERS = STORAGE_HEADERS.copy()
+V4_CHANGE_HEADERS = CHANGE_HEADERS.copy()
+LEGACY_NOTE_HEADER_MAP = {"备注": "备注1"}
 
 
 class WorkbookValidationError(ValueError):
@@ -391,13 +483,19 @@ class ExcelRepository:
                 if row[0] == "工作簿版本":
                     version = str(row[1] or "")
                     break
-            if version == "3":
+            if version == "5":
+                return
+            if version == "4":
+                self._migrate_v4(workbook)
                 return
             if version == "1":
                 self._migrate_v1(workbook)
                 return
             if version == "2":
                 self._migrate_v2(workbook)
+                return
+            if version == "3":
+                self._migrate_v3(workbook)
                 return
             else:
                 raise WorkbookValidationError(f"不支持的工作簿版本：{version or '未知'}")
@@ -432,17 +530,9 @@ class ExcelRepository:
             if actual != expected:
                 raise WorkbookValidationError(f"旧版工作表字段结构无法识别：{sheet_name}")
 
-        old_rows = [
-            dict(zip(V1_ASSET_HEADERS, row))
-            for row in workbook[ASSET_SHEET].iter_rows(min_row=2, values_only=True)
-            if any(value is not None for value in row)
-        ]
-        migrated_rows = []
-        for old in old_rows:
-            migrated = {header: None for header in ASSET_HEADERS}
-            for old_header, value in old.items():
-                migrated[V1_TO_V3_HEADERS.get(old_header, old_header)] = value
-            migrated_rows.append([migrated[header] for header in ASSET_HEADERS])
+        migrated_rows = self._migrate_asset_rows(
+            workbook[ASSET_SHEET], V1_ASSET_HEADERS, V1_TO_V4_HEADERS
+        )
 
         del workbook[ASSET_SHEET]
         self._create_sheet(workbook, ASSET_SHEET, ASSET_HEADERS, migrated_rows, "AssetsTable")
@@ -457,8 +547,8 @@ class ExcelRepository:
 
         self._replace_header_row(workbook[CHANGE_SHEET], CHANGE_HEADERS)
         for row in workbook[CHANGE_SHEET].iter_rows(min_row=2):
-            if row[4].value in V1_TO_V3_HEADERS:
-                row[4].value = V1_TO_V3_HEADERS[row[4].value]
+            if row[4].value in V1_TO_V4_HEADERS:
+                row[4].value = V1_TO_V4_HEADERS[row[4].value]
             if row[3].value == "状态变更":
                 row[3].value = "使用状态变更"
             elif row[3].value == "位置变更":
@@ -470,7 +560,7 @@ class ExcelRepository:
                 row[0].value = "取得方式"
         for row in workbook[CONFIG_SHEET].iter_rows(min_row=2):
             if row[0].value == "工作簿版本":
-                row[1].value = "3"
+                row[1].value = "5"
                 break
 
         self.backup_workbook()
@@ -496,17 +586,9 @@ class ExcelRepository:
             if actual != expected:
                 raise WorkbookValidationError(f"旧版工作表字段结构无法识别：{sheet_name}")
 
-        old_rows = [
-            dict(zip(V2_ASSET_HEADERS, row))
-            for row in workbook[ASSET_SHEET].iter_rows(min_row=2, values_only=True)
-            if any(value is not None for value in row)
-        ]
-        migrated_rows = []
-        for old in old_rows:
-            migrated = {header: None for header in ASSET_HEADERS}
-            for old_header, value in old.items():
-                migrated[V2_TO_V3_ASSET_HEADERS.get(old_header, old_header)] = value
-            migrated_rows.append([migrated[header] for header in ASSET_HEADERS])
+        migrated_rows = self._migrate_asset_rows(
+            workbook[ASSET_SHEET], V2_ASSET_HEADERS, V2_TO_V3_ASSET_HEADERS
+        )
 
         asset_index = workbook._sheets.index(workbook[ASSET_SHEET])
         del workbook[ASSET_SHEET]
@@ -515,18 +597,151 @@ class ExcelRepository:
         workbook._sheets.remove(asset_sheet)
         workbook._sheets.insert(asset_index, asset_sheet)
 
-        self._replace_header_row(workbook[STORAGE_SHEET], STORAGE_HEADERS)
+        storage_index = workbook._sheets.index(workbook[STORAGE_SHEET])
+        storage_rows = self._migrate_storage_rows(
+            workbook[STORAGE_SHEET], V2_STORAGE_HEADERS, V2_TO_V3_STORAGE_HEADERS
+        )
+        del workbook[STORAGE_SHEET]
+        self._create_sheet(workbook, STORAGE_SHEET, STORAGE_HEADERS, storage_rows, "StorageMediaTable")
+        storage_sheet = workbook[STORAGE_SHEET]
+        workbook._sheets.remove(storage_sheet)
+        workbook._sheets.insert(storage_index, storage_sheet)
         self._replace_header_row(workbook[CHANGE_SHEET], CHANGE_HEADERS)
         for row in workbook[CHANGE_SHEET].iter_rows(min_row=2):
             if row[4].value in V2_TO_V3_FIELD_NAMES:
                 row[4].value = V2_TO_V3_FIELD_NAMES[row[4].value]
         for row in workbook[CONFIG_SHEET].iter_rows(min_row=2):
             if row[0].value == "工作簿版本":
-                row[1].value = "3"
+                row[1].value = "5"
                 break
 
         self.backup_workbook()
         self._save_atomic(workbook, create_backup=False)
+
+    def _migrate_v3(self, workbook) -> None:
+        expected_v3_headers = {
+            ASSET_SHEET: V3_ASSET_HEADERS,
+            STORAGE_SHEET: V3_STORAGE_HEADERS,
+            CHANGE_SHEET: V3_CHANGE_HEADERS,
+            CATEGORY_SHEET: CATEGORY_HEADERS,
+            LOCATION_SHEET: LOCATION_HEADERS,
+            ENUM_SHEET: ENUM_HEADERS,
+            CONFIG_SHEET: CONFIG_HEADERS,
+        }
+        for sheet_name, expected in expected_v3_headers.items():
+            if sheet_name not in workbook.sheetnames:
+                raise WorkbookValidationError(f"旧版工作簿缺少工作表：{sheet_name}")
+            actual = [
+                cell.value
+                for cell in next(workbook[sheet_name].iter_rows(max_row=1))
+            ]
+            if actual != expected:
+                raise WorkbookValidationError(f"旧版工作表字段结构无法识别：{sheet_name}")
+
+        asset_index = workbook._sheets.index(workbook[ASSET_SHEET])
+        asset_rows = self._migrate_asset_rows(
+            workbook[ASSET_SHEET], V3_ASSET_HEADERS, LEGACY_NOTE_HEADER_MAP
+        )
+        del workbook[ASSET_SHEET]
+        self._create_sheet(workbook, ASSET_SHEET, ASSET_HEADERS, asset_rows, "AssetsTable")
+        asset_sheet = workbook[ASSET_SHEET]
+        workbook._sheets.remove(asset_sheet)
+        workbook._sheets.insert(asset_index, asset_sheet)
+
+        storage_index = workbook._sheets.index(workbook[STORAGE_SHEET])
+        storage_rows = self._migrate_storage_rows(workbook[STORAGE_SHEET], V3_STORAGE_HEADERS, {})
+        del workbook[STORAGE_SHEET]
+        self._create_sheet(workbook, STORAGE_SHEET, STORAGE_HEADERS, storage_rows, "StorageMediaTable")
+        storage_sheet = workbook[STORAGE_SHEET]
+        workbook._sheets.remove(storage_sheet)
+        workbook._sheets.insert(storage_index, storage_sheet)
+        for row in workbook[CHANGE_SHEET].iter_rows(min_row=2):
+            if row[4].value in LEGACY_NOTE_HEADER_MAP:
+                row[4].value = LEGACY_NOTE_HEADER_MAP[row[4].value]
+
+        for row in workbook[CONFIG_SHEET].iter_rows(min_row=2):
+            if row[0].value == "工作簿版本":
+                row[1].value = "5"
+                break
+
+        self.backup_workbook()
+        self._save_atomic(workbook, create_backup=False)
+
+    def _migrate_v4(self, workbook) -> None:
+        expected_v4_headers = {
+            ASSET_SHEET: V4_ASSET_HEADERS,
+            STORAGE_SHEET: V4_STORAGE_HEADERS,
+            CHANGE_SHEET: V4_CHANGE_HEADERS,
+            CATEGORY_SHEET: CATEGORY_HEADERS,
+            LOCATION_SHEET: LOCATION_HEADERS,
+            ENUM_SHEET: ENUM_HEADERS,
+            CONFIG_SHEET: CONFIG_HEADERS,
+        }
+        for sheet_name, expected in expected_v4_headers.items():
+            if sheet_name not in workbook.sheetnames:
+                raise WorkbookValidationError(f"旧版工作簿缺少工作表：{sheet_name}")
+            actual = [
+                cell.value
+                for cell in next(workbook[sheet_name].iter_rows(max_row=1))
+            ]
+            if actual != expected:
+                raise WorkbookValidationError(f"旧版工作表字段结构无法识别：{sheet_name}")
+
+        asset_index = workbook._sheets.index(workbook[ASSET_SHEET])
+        asset_rows = self._migrate_asset_rows(
+            workbook[ASSET_SHEET], V4_ASSET_HEADERS, LEGACY_NOTE_HEADER_MAP
+        )
+        del workbook[ASSET_SHEET]
+        self._create_sheet(workbook, ASSET_SHEET, ASSET_HEADERS, asset_rows, "AssetsTable")
+        asset_sheet = workbook[ASSET_SHEET]
+        workbook._sheets.remove(asset_sheet)
+        workbook._sheets.insert(asset_index, asset_sheet)
+
+        for row in workbook[CHANGE_SHEET].iter_rows(min_row=2):
+            if row[4].value in LEGACY_NOTE_HEADER_MAP:
+                row[4].value = LEGACY_NOTE_HEADER_MAP[row[4].value]
+
+        for row in workbook[CONFIG_SHEET].iter_rows(min_row=2):
+            if row[0].value == "工作簿版本":
+                row[1].value = "5"
+                break
+
+        self.backup_workbook()
+        self._save_atomic(workbook, create_backup=False)
+
+    @staticmethod
+    def _migrate_asset_rows(sheet, old_headers: list[str], header_map: dict[str, str]) -> list[list[Any]]:
+        migrated_rows = []
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            if not any(value is not None for value in row):
+                continue
+            old = dict(zip(old_headers, row))
+            migrated = {header: None for header in ASSET_HEADERS}
+            for old_header, value in old.items():
+                migrated[header_map.get(old_header, old_header)] = value
+            if not migrated.get("类别路径"):
+                migrated["类别路径"] = ExcelRepository._category_path(
+                    migrated.get("一级类别"), migrated.get("二级类别")
+                )
+            migrated_rows.append([migrated[header] for header in ASSET_HEADERS])
+        return migrated_rows
+
+    @staticmethod
+    def _migrate_storage_rows(sheet, old_headers: list[str], header_map: dict[str, str]) -> list[list[Any]]:
+        migrated_rows = []
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            if not any(value is not None for value in row):
+                continue
+            old = dict(zip(old_headers, row))
+            migrated = {header: None for header in STORAGE_HEADERS}
+            for old_header, value in old.items():
+                migrated[header_map.get(old_header, old_header)] = value
+            migrated_rows.append([migrated[header] for header in STORAGE_HEADERS])
+        return migrated_rows
+
+    @staticmethod
+    def _category_path(*parts: Any) -> str:
+        return " / ".join(str(part).strip() for part in parts if str(part or "").strip())
 
     def require_valid(self) -> None:
         errors = self.validate_workbook()
@@ -697,8 +912,12 @@ class ExcelRepository:
             "资产唯一标识符": 18,
             "bm编码": 18,
             "设备器材": 20,
+            "类别路径": 28,
+            "使用状态": 14,
             "名称/编号": 18,
             "备注": 30,
+            "备注1": 34,
+            "备注2": 34,
             "修改说明": 30,
             "创建时间": 20,
             "更新时间": 20,

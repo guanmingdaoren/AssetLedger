@@ -83,6 +83,115 @@ V2_CHANGE_HEADERS = [
     "修改说明",
 ]
 
+V3_ASSET_HEADERS = [
+    "资产UID",
+    "bm编码",
+    "资产唯一标识符",
+    "设备器材",
+    "一级类别",
+    "二级类别",
+    "产品规格",
+    "产品型号",
+    "设备序列号",
+    "生产厂家",
+    "供应商",
+    "品牌",
+    "取得方式",
+    "取得日期",
+    "启用日期",
+    "计价方式",
+    "金额",
+    "管理部门",
+    "管理人",
+    "使用部门",
+    "使用人",
+    "存放地点",
+    "出厂日期",
+    "等级",
+    "使用状态",
+    "是否已打印标签",
+    "备注",
+    "创建时间",
+    "更新时间",
+]
+
+V3_STORAGE_HEADERS = [
+    "存储介质ID",
+    "资产UID",
+    "介质类型",
+    "名称/编号",
+    "品牌",
+    "容量数值",
+    "容量单位",
+    "型号",
+    "序列号",
+    "备注",
+    "创建时间",
+    "更新时间",
+]
+
+V3_CHANGE_HEADERS = [
+    "变更ID",
+    "事件组ID",
+    "资产UID",
+    "事件类型",
+    "变化字段",
+    "修改前值",
+    "修改后值",
+    "修改时间",
+    "操作者",
+    "修改说明",
+]
+
+V4_ASSET_HEADERS = [
+    "资产UID",
+    "bm编码",
+    "资产唯一标识符",
+    "设备器材",
+    "一级类别",
+    "二级类别",
+    "类别路径",
+    "产品规格",
+    "产品型号",
+    "设备序列号",
+    "生产厂家",
+    "供应商",
+    "品牌",
+    "取得方式",
+    "取得日期",
+    "启用日期",
+    "计价方式",
+    "金额",
+    "管理部门",
+    "管理人",
+    "使用部门",
+    "使用人",
+    "存放地点",
+    "出厂日期",
+    "等级",
+    "使用状态",
+    "是否已打印标签",
+    "备注",
+    "创建时间",
+    "更新时间",
+]
+
+V4_STORAGE_HEADERS = [
+    "存储介质ID",
+    "资产UID",
+    "介质类型",
+    "使用状态",
+    "名称/编号",
+    "品牌",
+    "容量数值",
+    "容量单位",
+    "型号",
+    "序列号",
+    "备注",
+    "创建时间",
+    "更新时间",
+]
+
 V1_ASSET_HEADERS = [
     "资产ID",
     "装备编码",
@@ -127,17 +236,24 @@ class ExcelRepositoryTests(unittest.TestCase):
                     "系统配置",
                 ],
             )
-            self.assertEqual(workbook["系统配置"]["B2"].value, "3")
+            self.assertEqual(workbook["系统配置"]["B2"].value, "5")
             self.assertEqual(
                 [cell.value for cell in next(workbook["资产台账"].iter_rows(max_row=1))],
                 ASSET_HEADERS,
             )
-            self.assertEqual(ASSET_HEADERS[:4], ["资产UID", "bm编码", "资产唯一标识符", "设备器材"])
+            self.assertIn("备注1", ASSET_HEADERS)
+            self.assertIn("备注2", ASSET_HEADERS)
+            self.assertNotIn("备注", ASSET_HEADERS)
+            self.assertEqual(
+                ASSET_HEADERS[:7],
+                ["资产UID", "bm编码", "资产唯一标识符", "设备器材", "一级类别", "二级类别", "类别路径"],
+            )
             self.assertEqual(
                 [cell.value for cell in next(workbook["存储介质"].iter_rows(max_row=1))],
                 STORAGE_HEADERS,
             )
             self.assertEqual(STORAGE_HEADERS[1], "资产UID")
+            self.assertEqual(STORAGE_HEADERS[3], "使用状态")
             self.assertEqual(CHANGE_HEADERS[2], "资产UID")
             self.assertGreater(workbook["分类字典"].max_row, 7)
             self.assertGreater(workbook["枚举字典"].max_row, 7)
@@ -212,7 +328,7 @@ class ExcelRepositoryTests(unittest.TestCase):
 
             migrated = load_workbook(path, read_only=True, data_only=True)
             self.assertIn("存储介质", migrated.sheetnames)
-            self.assertEqual(migrated["系统配置"]["B2"].value, "3")
+            self.assertEqual(migrated["系统配置"]["B2"].value, "5")
             row = next(migrated["资产台账"].iter_rows(min_row=2, values_only=True))
             headers = [
                 cell.value for cell in next(migrated["资产台账"].iter_rows(max_row=1))
@@ -222,9 +338,12 @@ class ExcelRepositoryTests(unittest.TestCase):
             self.assertIsNone(values["资产唯一标识符"])
             self.assertEqual(values["bm编码"], "BM-001")
             self.assertEqual(values["设备器材"], "旧电脑")
+            self.assertEqual(values["类别路径"], "IT 与通信设备 / 电脑")
             self.assertEqual(values["产品型号"], "T14")
             self.assertEqual(values["管理部门"], "技术部")
             self.assertEqual(values["管理人"], "张三")
+            self.assertEqual(values["备注1"], "旧备注")
+            self.assertIsNone(values["备注2"])
             migrated.close()
             self.assertEqual(len(list((path.parent / "backups").glob("assets-*.xlsx"))), 1)
             self.assertEqual(repository.validate_workbook(), [])
@@ -361,15 +480,252 @@ class ExcelRepositoryTests(unittest.TestCase):
                 zip(change_headers, next(migrated["变更历史"].iter_rows(min_row=2, values_only=True)))
             )
 
-            self.assertEqual(migrated["系统配置"]["B2"].value, "3")
+            self.assertEqual(migrated["系统配置"]["B2"].value, "5")
             self.assertEqual(asset_headers, ASSET_HEADERS)
             self.assertEqual(asset_values["资产UID"], "AST-2026-000001")
             self.assertIsNone(asset_values["资产唯一标识符"])
+            self.assertEqual(asset_values["类别路径"], "IT 与通信设备 / 电脑")
             self.assertEqual(asset_values["bm编码"], "BM-001")
+            self.assertEqual(asset_values["备注1"], "旧备注")
+            self.assertIsNone(asset_values["备注2"])
             self.assertEqual(storage_headers[1], "资产UID")
+            self.assertEqual(storage_headers[3], "使用状态")
             self.assertEqual(change_headers[2], "资产UID")
             self.assertEqual(change_values["资产UID"], "AST-2026-000001")
             self.assertEqual(change_values["变化字段"], "资产UID")
+            migrated.close()
+            self.assertEqual(len(list((path.parent / "backups").glob("assets-*.xlsx"))), 1)
+            self.assertEqual(repository.validate_workbook(), [])
+
+    def test_initialize_migrates_v3_workbook_to_category_path_and_storage_status(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "assets.xlsx"
+            workbook = Workbook()
+            workbook.remove(workbook.active)
+            ExcelRepository._create_sheet(
+                workbook,
+                "资产台账",
+                V3_ASSET_HEADERS,
+                [
+                    [
+                        "AST-2026-000001",
+                        "BM-001",
+                        "ZC-001",
+                        "旧电脑",
+                        "IT 与通信设备",
+                        "电脑",
+                        "14英寸 / 32GB",
+                        "T14",
+                        "SN-001",
+                        "联想（北京）有限公司",
+                        "示例供应商",
+                        "联想",
+                        "采购",
+                        "2026-01-02",
+                        "2026-01-05",
+                        "原值",
+                        5999,
+                        "技术部",
+                        "张三",
+                        "研发部",
+                        "李四",
+                        "办公室",
+                        "2025-12-01",
+                        "A",
+                        "在用",
+                        True,
+                        "旧备注",
+                        "2026-01-02 10:00:00",
+                        "2026-01-02 10:00:00",
+                    ]
+                ],
+                "AssetsTable",
+            )
+            ExcelRepository._create_sheet(
+                workbook,
+                "存储介质",
+                V3_STORAGE_HEADERS,
+                [
+                    [
+                        "MED-1",
+                        "AST-2026-000001",
+                        "SSD",
+                        "系统盘",
+                        "三星",
+                        1,
+                        "TB",
+                        "990 PRO",
+                        "SSD-SN-001",
+                        "",
+                        "2026-01-02 10:00:00",
+                        "2026-01-02 10:00:00",
+                    ]
+                ],
+                "StorageMediaTable",
+            )
+            ExcelRepository._create_sheet(
+                workbook,
+                "变更历史",
+                V3_CHANGE_HEADERS,
+                [],
+                "ChangesTable",
+            )
+            ExcelRepository._create_sheet(
+                workbook,
+                "分类字典",
+                CATEGORY_HEADERS,
+                DEFAULT_CATEGORIES,
+                "CategoriesTable",
+            )
+            ExcelRepository._create_sheet(
+                workbook,
+                "位置字典",
+                LOCATION_HEADERS,
+                DEFAULT_LOCATIONS,
+                "LocationsTable",
+            )
+            ExcelRepository._create_sheet(
+                workbook, "枚举字典", ENUM_HEADERS, DEFAULT_ENUMS, "EnumsTable"
+            )
+            v3_config = [
+                ("工作簿版本", "3", "用于识别工作簿结构"),
+                *[row for row in DEFAULT_CONFIG if row[0] != "工作簿版本"],
+            ]
+            ExcelRepository._create_sheet(
+                workbook, "系统配置", CONFIG_HEADERS, v3_config, "ConfigTable"
+            )
+            workbook.save(path)
+            workbook.close()
+
+            repository = ExcelRepository(path)
+            repository.initialize()
+
+            migrated = load_workbook(path, read_only=True, data_only=True)
+            asset_headers = [
+                cell.value for cell in next(migrated["资产台账"].iter_rows(max_row=1))
+            ]
+            storage_headers = [
+                cell.value for cell in next(migrated["存储介质"].iter_rows(max_row=1))
+            ]
+            asset_values = dict(
+                zip(asset_headers, next(migrated["资产台账"].iter_rows(min_row=2, values_only=True)))
+            )
+            storage_values = dict(
+                zip(storage_headers, next(migrated["存储介质"].iter_rows(min_row=2, values_only=True)))
+            )
+
+            self.assertEqual(migrated["系统配置"]["B2"].value, "5")
+            self.assertEqual(asset_headers, ASSET_HEADERS)
+            self.assertEqual(storage_headers, STORAGE_HEADERS)
+            self.assertEqual(asset_values["类别路径"], "IT 与通信设备 / 电脑")
+            self.assertEqual(asset_values["备注1"], "旧备注")
+            self.assertIsNone(asset_values["备注2"])
+            self.assertIsNone(storage_values["使用状态"])
+            migrated.close()
+            self.assertEqual(len(list((path.parent / "backups").glob("assets-*.xlsx"))), 1)
+            self.assertEqual(repository.validate_workbook(), [])
+
+    def test_initialize_migrates_v4_workbook_to_two_note_fields(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "assets.xlsx"
+            workbook = Workbook()
+            workbook.remove(workbook.active)
+            ExcelRepository._create_sheet(
+                workbook,
+                "资产台账",
+                V4_ASSET_HEADERS,
+                [
+                    [
+                        "AST-2026-000001",
+                        "BM-001",
+                        "ZC-001",
+                        "旧电脑",
+                        "IT 与通信设备",
+                        "电脑",
+                        "IT 与通信设备 / 电脑",
+                        "14英寸 / 32GB",
+                        "T14",
+                        "SN-001",
+                        "联想（北京）有限公司",
+                        "示例供应商",
+                        "联想",
+                        "采购",
+                        "2026-01-02",
+                        "2026-01-05",
+                        "原值",
+                        5999,
+                        "技术部",
+                        "张三",
+                        "研发部",
+                        "李四",
+                        "办公室",
+                        "2025-12-01",
+                        "A",
+                        "在用",
+                        True,
+                        "旧备注",
+                        "2026-01-02 10:00:00",
+                        "2026-01-02 10:00:00",
+                    ]
+                ],
+                "AssetsTable",
+            )
+            ExcelRepository._create_sheet(
+                workbook,
+                "存储介质",
+                V4_STORAGE_HEADERS,
+                [],
+                "StorageMediaTable",
+            )
+            ExcelRepository._create_sheet(
+                workbook,
+                "变更历史",
+                V3_CHANGE_HEADERS,
+                [],
+                "ChangesTable",
+            )
+            ExcelRepository._create_sheet(
+                workbook,
+                "分类字典",
+                CATEGORY_HEADERS,
+                DEFAULT_CATEGORIES,
+                "CategoriesTable",
+            )
+            ExcelRepository._create_sheet(
+                workbook,
+                "位置字典",
+                LOCATION_HEADERS,
+                DEFAULT_LOCATIONS,
+                "LocationsTable",
+            )
+            ExcelRepository._create_sheet(
+                workbook, "枚举字典", ENUM_HEADERS, DEFAULT_ENUMS, "EnumsTable"
+            )
+            v4_config = [
+                ("工作簿版本", "4", "用于识别工作簿结构"),
+                *[row for row in DEFAULT_CONFIG if row[0] != "工作簿版本"],
+            ]
+            ExcelRepository._create_sheet(
+                workbook, "系统配置", CONFIG_HEADERS, v4_config, "ConfigTable"
+            )
+            workbook.save(path)
+            workbook.close()
+
+            repository = ExcelRepository(path)
+            repository.initialize()
+
+            migrated = load_workbook(path, read_only=True, data_only=True)
+            asset_headers = [
+                cell.value for cell in next(migrated["资产台账"].iter_rows(max_row=1))
+            ]
+            asset_values = dict(
+                zip(asset_headers, next(migrated["资产台账"].iter_rows(min_row=2, values_only=True)))
+            )
+
+            self.assertEqual(migrated["系统配置"]["B2"].value, "5")
+            self.assertEqual(asset_headers, ASSET_HEADERS)
+            self.assertEqual(asset_values["备注1"], "旧备注")
+            self.assertIsNone(asset_values["备注2"])
             migrated.close()
             self.assertEqual(len(list((path.parent / "backups").glob("assets-*.xlsx"))), 1)
             self.assertEqual(repository.validate_workbook(), [])

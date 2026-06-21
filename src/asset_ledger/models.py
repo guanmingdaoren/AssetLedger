@@ -13,6 +13,7 @@ class Asset:
     name: str = ""
     primary_category: str = ""
     secondary_category: str = ""
+    category_path: str = ""
     product_spec: str = ""
     model: str = ""
     serial_number: str = ""
@@ -34,6 +35,7 @@ class Asset:
     status: str = ""
     label_printed: bool = False
     notes: str = ""
+    notes2: str = ""
     created_at: str = ""
     updated_at: str = ""
 
@@ -59,6 +61,7 @@ class StorageMedium:
     storage_id: str = ""
     asset_id: str = ""
     medium_type: str = ""
+    status: str = ""
     name: str = ""
     brand: str = ""
     capacity_value: float = 0.0

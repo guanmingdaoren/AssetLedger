@@ -52,6 +52,7 @@ FIELD_TO_HEADER = {
     "name": "设备器材",
     "primary_category": "一级类别",
     "secondary_category": "二级类别",
+    "category_path": "类别路径",
     "product_spec": "产品规格",
     "model": "产品型号",
     "serial_number": "设备序列号",
@@ -72,7 +73,8 @@ FIELD_TO_HEADER = {
     "grade": "等级",
     "status": "使用状态",
     "label_printed": "是否已打印标签",
-    "notes": "备注",
+    "notes": "备注1",
+    "notes2": "备注2",
     "created_at": "创建时间",
     "updated_at": "更新时间",
 }
@@ -87,6 +89,7 @@ STORAGE_FIELD_TO_HEADER = {
     "storage_id": "存储介质ID",
     "asset_id": "资产UID",
     "medium_type": "介质类型",
+    "status": "使用状态",
     "name": "名称/编号",
     "brand": "品牌",
     "capacity_value": "容量数值",
@@ -147,6 +150,7 @@ class AssetService:
             "equipment_code",
             "asset_identifier",
             "name",
+            "category_path",
             "product_spec",
             "brand",
             "model",
@@ -157,6 +161,8 @@ class AssetService:
             "owner",
             "use_department",
             "user",
+            "notes",
+            "notes2",
         )
         for asset in snapshot.assets:
             if needle and not any(
@@ -461,6 +467,35 @@ class AssetService:
         finally:
             workbook.close()
 
+    def delete_dictionary_item(self, sheet_name: str, item_id: str) -> None:
+        if sheet_name not in {CATEGORY_SHEET, LOCATION_SHEET}:
+            raise AssetServiceError(f"不支持删除的字典：{sheet_name}")
+        workbook = self._load_for_write()
+        try:
+            sheet = workbook[sheet_name]
+            rows = [
+                row
+                for row in sheet.iter_rows(min_row=2, values_only=True)
+                if row[0]
+            ]
+            target = next((row for row in rows if str(row[0]) == item_id), None)
+            if not target:
+                raise AssetServiceError(f"未找到字典项：{item_id}")
+            if any(str(row[1] or "") == item_id for row in rows):
+                raise AssetServiceError("该字典项包含子项，请先删除或停用子项。")
+            target_name = str(target[2] or "")
+            if self._dictionary_item_is_used(workbook, sheet_name, item_id, target_name, rows):
+                raise AssetServiceError("该字典项已被设备使用，不能删除，请改用停用。")
+            for row_number in range(2, sheet.max_row + 1):
+                if sheet.cell(row=row_number, column=1).value == item_id:
+                    sheet.delete_rows(row_number, 1)
+                    self._resize_table(sheet)
+                    self._save_and_reload(workbook)
+                    return
+            raise AssetServiceError(f"未找到字典项：{item_id}")
+        finally:
+            workbook.close()
+
     def set_enum_values(self, enum_type: str, values: list[str]) -> None:
         cleaned = list(dict.fromkeys(value.strip() for value in values if value.strip()))
         if not cleaned:
@@ -640,15 +675,79 @@ class AssetService:
             if value is None:
                 if asset_value:
                     return False
+            elif key == "category_path":
+                expected = str(value)
+                if asset_value != expected and not asset_value.startswith(f"{expected} / "):
+                    return False
             elif asset_value != str(value):
                 return False
         return True
 
     @staticmethod
+    def _dictionary_item_is_used(
+        workbook,
+        sheet_name: str,
+        item_id: str,
+        item_name: str,
+        dictionary_rows: list[tuple[Any, ...]],
+    ) -> bool:
+        if sheet_name == LOCATION_SHEET:
+            location_index = ASSET_HEADERS.index("存放地点")
+            return any(
+                row[location_index] == item_name
+                for row in workbook[ASSET_SHEET].iter_rows(min_row=2, values_only=True)
+                if row[0]
+            )
+        category_path = AssetService._dictionary_path(item_id, dictionary_rows)
+        primary_index = ASSET_HEADERS.index("一级类别")
+        secondary_index = ASSET_HEADERS.index("二级类别")
+        path_index = ASSET_HEADERS.index("类别路径")
+        for row in workbook[ASSET_SHEET].iter_rows(min_row=2, values_only=True):
+            if not row[0]:
+                continue
+            row_path = str(row[path_index] or "")
+            if category_path and (
+                row_path == category_path or row_path.startswith(f"{category_path} / ")
+            ):
+                return True
+            if row[primary_index] == item_name or row[secondary_index] == item_name:
+                return True
+        return False
+
+    @staticmethod
+    def _dictionary_path(item_id: str, rows: list[tuple[Any, ...]]) -> str:
+        by_id = {str(row[0]): row for row in rows if row[0]}
+        names: list[str] = []
+        current_id = item_id
+        seen: set[str] = set()
+        while current_id and current_id in by_id and current_id not in seen:
+            seen.add(current_id)
+            row = by_id[current_id]
+            names.append(str(row[2] or ""))
+            current_id = str(row[1] or "")
+        return " / ".join(reversed([name for name in names if name]))
+
+    @staticmethod
     def _normalize_asset(asset_data: dict[str, Any] | Asset) -> Asset:
         if isinstance(asset_data, Asset):
-            return Asset.from_mapping(asdict(asset_data))
-        return Asset.from_mapping(asset_data)
+            asset = Asset.from_mapping(asdict(asset_data))
+        else:
+            asset = Asset.from_mapping(asset_data)
+        AssetService._normalize_category_fields(asset)
+        return asset
+
+    @staticmethod
+    def _normalize_category_fields(asset: Asset) -> None:
+        path = str(asset.category_path or "").strip()
+        if path:
+            parts = [part.strip() for part in path.split("/") if part.strip()]
+            asset.category_path = " / ".join(parts)
+            asset.primary_category = parts[0] if parts else ""
+            asset.secondary_category = parts[1] if len(parts) > 1 else ""
+            return
+        asset.category_path = " / ".join(
+            value for value in (asset.primary_category, asset.secondary_category) if value
+        )
 
     @staticmethod
     def _normalize_storage_media(
@@ -955,10 +1054,14 @@ class AssetService:
 
     @staticmethod
     def _storage_to_row(medium: StorageMedium) -> list[Any]:
-        return [
-            getattr(medium, STORAGE_HEADER_TO_FIELD[header])
-            for header in STORAGE_HEADERS
-        ]
+        row = []
+        for header in STORAGE_HEADERS:
+            field = STORAGE_HEADER_TO_FIELD[header]
+            value = getattr(medium, field)
+            if field == "capacity_value" and not value:
+                value = None
+            row.append(value)
+        return row
 
     @staticmethod
     def _storage_from_row(row: tuple[Any, ...]) -> StorageMedium:
@@ -982,6 +1085,7 @@ class AssetService:
             value
             for value in (
                 medium.medium_type,
+                medium.status,
                 medium.name,
                 medium.brand,
                 capacity,

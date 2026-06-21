@@ -97,12 +97,15 @@ class SettingsDialog(QDialog):
         add_root = QPushButton("新增一级项")
         add_child = QPushButton("新增子项")
         toggle = QPushButton("启用 / 停用")
+        delete = QPushButton("删除")
         add_root.clicked.connect(lambda: self._add_dictionary(sheet_name, tree, False))
         add_child.clicked.connect(lambda: self._add_dictionary(sheet_name, tree, True))
         toggle.clicked.connect(lambda: self._toggle_dictionary(sheet_name, tree))
+        delete.clicked.connect(lambda: self._delete_dictionary(sheet_name, tree))
         controls.addWidget(add_root)
         controls.addWidget(add_child)
         controls.addWidget(toggle)
+        controls.addWidget(delete)
         controls.addStretch()
         layout.addLayout(controls)
         return tab
@@ -151,6 +154,8 @@ class SettingsDialog(QDialog):
             if not item.enabled:
                 node.setForeground(0, Qt.GlobalColor.gray)
             by_id[item.item_id] = node
+        for item in items:
+            node = by_id[item.item_id]
             if item.parent_id and item.parent_id in by_id:
                 by_id[item.parent_id].addChild(node)
             else:
@@ -185,6 +190,17 @@ class SettingsDialog(QDialog):
             self._refresh_tree(sheet_name, tree)
         except Exception as exc:
             QMessageBox.warning(self, "无法修改", str(exc))
+
+    def _delete_dictionary(self, sheet_name: str, tree: QTreeWidget) -> None:
+        selected = tree.currentItem()
+        if not selected:
+            return
+        item_id = str(selected.data(0, Qt.ItemDataRole.UserRole))
+        try:
+            self.service.delete_dictionary_item(sheet_name, item_id)
+            self._refresh_tree(sheet_name, tree)
+        except Exception as exc:
+            QMessageBox.warning(self, "无法删除", str(exc))
 
     def _refresh_tree(self, sheet_name: str, tree: QTreeWidget) -> None:
         items = (

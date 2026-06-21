@@ -5,7 +5,7 @@ from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QAction, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSplitter,
@@ -47,6 +48,7 @@ STATUS_COLORS = {
 }
 
 TABLE_COLUMNS = [
+    ("row_number", "序号"),
     ("asset_id", "资产UID"),
     ("equipment_code", "bm编码"),
     ("asset_identifier", "资产唯一标识符"),
@@ -71,6 +73,7 @@ class MainWindow(QMainWindow):
         self.workbook_path = Path(workbook_path)
         self.assets: list[Asset] = []
         self.last_refresh_time = ""
+        self.recently_copied_asset_id = ""
         self.setWindowTitle("设备资产台账")
         self.resize(1500, 900)
         self.setMinimumSize(1100, 680)
@@ -172,6 +175,11 @@ class MainWindow(QMainWindow):
             self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder)
         )
         new_button.clicked.connect(self.create_asset)
+        copy_button = QPushButton("复制")
+        copy_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogToParent)
+        )
+        copy_button.clicked.connect(self.copy_selected_asset)
         edit_button = QPushButton("编辑")
         edit_button.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView)
@@ -183,6 +191,7 @@ class MainWindow(QMainWindow):
         refresh_button.clicked.connect(self.refresh_all)
         toolbar.addWidget(self.search_edit, 1)
         toolbar.addWidget(new_button)
+        toolbar.addWidget(copy_button)
         toolbar.addWidget(edit_button)
         toolbar.addWidget(refresh_button)
         layout.addLayout(toolbar)
@@ -198,9 +207,11 @@ class MainWindow(QMainWindow):
         self.asset_table.setAlternatingRowColors(True)
         self.asset_table.setSortingEnabled(True)
         self.asset_table.verticalHeader().setVisible(False)
+        self.asset_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.asset_table.customContextMenuRequested.connect(self._open_asset_context_menu)
         self.asset_table.itemSelectionChanged.connect(self.show_selected_asset)
         self.asset_table.itemDoubleClicked.connect(self.edit_selected_asset)
-        widths = [155, 125, 155, 150, 110, 150, 90, 110, 90, 90, 105, 145]
+        widths = [58, 155, 125, 155, 150, 150, 150, 90, 110, 90, 90, 105, 145]
         for index, width in enumerate(widths):
             self.asset_table.setColumnWidth(index, width)
         layout.addWidget(self.asset_table, 1)
@@ -310,22 +321,30 @@ class MainWindow(QMainWindow):
     def _load_category_tree(self, assets: list[Asset]) -> None:
         self.category_tree.clear()
         categories = self.service.get_categories(include_disabled=True)
-        primary_items: dict[str, QTreeWidgetItem] = {}
+        by_parent: dict[str, list] = {}
         for category in categories:
-            count = sum(
-                1
-                for asset in assets
-                if asset.primary_category == category.name
-                or asset.secondary_category == category.name
-            )
-            node = QTreeWidgetItem([f"{category.name}  ({count})"])
-            node.setData(0, Qt.ItemDataRole.UserRole, category.name)
-            node.setData(0, Qt.ItemDataRole.UserRole + 1, bool(category.parent_id))
-            if category.parent_id and category.parent_id in primary_items:
-                primary_items[category.parent_id].addChild(node)
-            else:
-                self.category_tree.addTopLevelItem(node)
-                primary_items[category.item_id] = node
+            by_parent.setdefault(category.parent_id, []).append(category)
+
+        def add_nodes(parent_item: QTreeWidgetItem | None, parent_id: str, parent_path: str) -> None:
+            for category in by_parent.get(parent_id, []):
+                path = " / ".join(value for value in (parent_path, category.name) if value)
+                count = sum(
+                    1
+                    for asset in assets
+                    if asset.category_path == path
+                    or asset.category_path.startswith(f"{path} / ")
+                    or (not asset.category_path and category.name in {asset.primary_category, asset.secondary_category})
+                )
+                node = QTreeWidgetItem([f"{category.name}  ({count})"])
+                node.setData(0, Qt.ItemDataRole.UserRole, path)
+                node.setData(0, Qt.ItemDataRole.UserRole + 1, bool(category.parent_id))
+                if parent_item is None:
+                    self.category_tree.addTopLevelItem(node)
+                else:
+                    parent_item.addChild(node)
+                add_nodes(node, category.item_id, path)
+
+        add_nodes(None, "", "")
         self.category_tree.expandAll()
 
     def refresh_assets(self, *_args) -> None:
@@ -344,19 +363,18 @@ class MainWindow(QMainWindow):
                 filters[field] = value
         selected_category = self.category_tree.currentItem()
         if selected_category:
-            category = selected_category.data(0, Qt.ItemDataRole.UserRole)
-            is_secondary = selected_category.data(0, Qt.ItemDataRole.UserRole + 1)
-            filters["secondary_category" if is_secondary else "primary_category"] = category
+            filters["category_path"] = selected_category.data(0, Qt.ItemDataRole.UserRole)
         self.assets = self.service.list_assets(filters, self.search_edit.text())
         self.asset_table.setSortingEnabled(False)
         self.asset_table.setRowCount(len(self.assets))
         for row, asset in enumerate(self.assets):
             values = [
+                row + 1,
                 asset.asset_id,
                 asset.equipment_code,
                 asset.asset_identifier,
                 asset.name,
-                asset.secondary_category or asset.primary_category,
+                asset.category_path or asset.secondary_category or asset.primary_category,
                 " / ".join(value for value in (asset.brand, asset.model) if value),
                 asset.status,
                 asset.location,
@@ -368,13 +386,17 @@ class MainWindow(QMainWindow):
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 item.setData(Qt.ItemDataRole.UserRole, asset.asset_id)
-                if column == 6:
+                if column == 0:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if column == 7:
                     item.setBackground(QColor(STATUS_COLORS.get(asset.status, "#FFFFFF")))
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if column == 10:
+                if column == 11:
                     item.setTextAlignment(
                         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
                     )
+                if asset.asset_id == self.recently_copied_asset_id:
+                    item.setBackground(QColor("#FFF4CC"))
                 self.asset_table.setItem(row, column, item)
         self.asset_table.setSortingEnabled(True)
         self._show_result_label()
@@ -390,63 +412,121 @@ class MainWindow(QMainWindow):
     def show_selected_asset(self) -> None:
         asset = self._selected_asset()
         if not asset:
+            self._update_copied_selection_style("")
             return
-        fields = [
-            ("资产UID", asset.asset_id),
-            ("bm编码", asset.equipment_code),
-            ("资产唯一标识符", asset.asset_identifier),
-            ("设备器材", asset.name),
+        self._update_copied_selection_style(asset.asset_id)
+        groups = [
             (
-                "设备分类",
-                " / ".join(v for v in (asset.primary_category, asset.secondary_category) if v),
-            ),
-            ("产品规格", asset.product_spec),
-            ("品牌 / 产品型号", " / ".join(v for v in (asset.brand, asset.model) if v)),
-            ("设备序列号", asset.serial_number),
-            ("生产厂家", asset.manufacturer),
-            ("供应商", asset.supplier),
-            ("取得方式", asset.source),
-            ("计价方式 / 金额", " / ".join(v for v in (asset.valuation_method, f"¥ {asset.price:,.2f}") if v)),
-            (
-                "取得 / 启用 / 出厂日期",
-                " / ".join(
-                    v
-                    for v in (
-                        asset.purchase_date,
-                        asset.start_date,
-                        asset.manufacture_date,
-                    )
-                    if v
-                ),
-            ),
-            ("等级", asset.grade),
-            ("使用状态", asset.status),
-            ("存放地点", asset.location),
-            (
-                "管理部门 / 管理人",
-                " / ".join(v for v in (asset.department, asset.owner) if v),
+                "身份信息",
+                [
+                    ("资产UID", asset.asset_id),
+                    ("bm编码", asset.equipment_code),
+                    ("资产唯一标识符", asset.asset_identifier),
+                    ("设备器材", asset.name),
+                    ("设备分类", asset.category_path or " / ".join(v for v in (asset.primary_category, asset.secondary_category) if v)),
+                ],
             ),
             (
-                "使用部门 / 使用人",
-                " / ".join(v for v in (asset.use_department, asset.user) if v),
+                "产品信息",
+                [
+                    ("产品规格", asset.product_spec),
+                    ("品牌 / 产品型号", " / ".join(v for v in (asset.brand, asset.model) if v)),
+                    ("设备序列号", asset.serial_number),
+                    ("生产厂家", asset.manufacturer),
+                    ("供应商", asset.supplier),
+                ],
             ),
-            ("是否已打印标签", "是" if asset.label_printed else "否"),
-            ("备注", asset.notes),
-            ("创建时间", asset.created_at),
-            ("更新时间", asset.updated_at),
+            (
+                "取得与资产信息",
+                [
+                    ("取得方式", asset.source),
+                    ("计价方式 / 金额", " / ".join(v for v in (asset.valuation_method, f"¥ {asset.price:,.2f}") if v)),
+                    (
+                        "取得 / 启用 / 出厂日期",
+                        " / ".join(
+                            v
+                            for v in (
+                                asset.purchase_date,
+                                asset.start_date,
+                                asset.manufacture_date,
+                            )
+                            if v
+                        ),
+                    ),
+                    ("等级", asset.grade),
+                    ("是否已打印标签", "是" if asset.label_printed else "否"),
+                ],
+            ),
+            (
+                "管理与使用信息",
+                [
+                    ("使用状态", asset.status),
+                    ("存放地点", asset.location),
+                    ("管理部门 / 管理人", " / ".join(v for v in (asset.department, asset.owner) if v)),
+                    ("使用部门 / 使用人", " / ".join(v for v in (asset.use_department, asset.user) if v)),
+                ],
+            ),
+            (
+                "备注信息",
+                [
+                    ("备注1", asset.notes),
+                    ("备注2", asset.notes2),
+                ],
+            ),
+            (
+                "系统信息",
+                [("创建时间", asset.created_at), ("更新时间", asset.updated_at)],
+            ),
         ]
+        system_group = groups.pop()
         media = self.service.list_storage_media(asset.asset_id)
+        card_colors = ["#F7FAFC", "#F8FBF7", "#FBFAF6", "#F7F8FC"]
+
+        def fields_html(fields) -> str:
+            return (
+                "<table width='100%' cellspacing='0' cellpadding='0' style='border-collapse:collapse;'>"
+                + "".join(
+                    (
+                        "<tr>"
+                        "<td width='42%' style='color:#667085; padding:6px 0; vertical-align:top;'>"
+                        f"{escape(label)}</td>"
+                        "<td width='58%' style='color:#17212B; font-weight:600; padding:6px 0; vertical-align:top;'>"
+                        f"{escape(str(value or '—'))}</td>"
+                        "</tr>"
+                    )
+                    for label, value in fields
+                )
+                + "</table>"
+            )
+
+        def card_html(title: str, fields, color: str) -> str:
+            return (
+                "<table width='100%' cellspacing='0' cellpadding='10' "
+                f"style='background:{color}; border:1px solid #E3EBEF; "
+                "border-collapse:separate; margin:0 0 12px 0;'>"
+                "<tr><td>"
+                f"<h3 style='margin:0 0 8px 0; color:#0F3D3E; font-size:15px;'>{escape(title)}</h3>"
+                f"{fields_html(fields)}"
+                "</td></tr></table>"
+            )
+
         storage_html = (
-            "<h3>存储介质</h3>"
+            "<table width='100%' cellspacing='0' cellpadding='10' "
+            "style='background:#F7FAFC; border:1px solid #E3EBEF; "
+            "border-collapse:separate; margin:0 0 12px 0;'><tr><td>"
+            "<h3 style='margin:0 0 8px 0; color:#0F3D3E; font-size:15px;'>存储介质</h3>"
             + "".join(
                 (
-                    "<p><b>{}</b><br>{}</p>".format(
+                    "<div style='padding:8px 0; border-top:1px solid #E8EEF1;'>"
+                    "<b style='color:#17212B'>{}</b><br>"
+                    "<span style='color:#667085'>{}</span></div>".format(
                         escape(medium.name or medium.medium_type or "未命名介质"),
                         escape(
                             " / ".join(
                                 value
                                 for value in (
                                     medium.medium_type,
+                                    medium.status,
                                     medium.brand,
                                     (
                                         f"{self.service._display_value(medium.capacity_value)}"
@@ -466,16 +546,28 @@ class MainWindow(QMainWindow):
                 for medium in media
             )
             if media
-            else "<h3>存储介质</h3><p>无存储介质</p>"
+            else (
+                "<table width='100%' cellspacing='0' cellpadding='10' "
+                "style='background:#F7FAFC; border:1px solid #E3EBEF; "
+                "border-collapse:separate; margin:0 0 12px 0;'><tr><td>"
+                "<h3 style='margin:0 0 8px 0; color:#0F3D3E; font-size:15px;'>存储介质</h3>"
+                "<p style='color:#667085; margin:0;'>无存储介质</p>"
+            )
+        ) + "</td></tr></table>"
+        body = "".join(
+            card_html(title, fields, card_colors[index % len(card_colors)])
+            for index, (title, fields) in enumerate(groups)
         )
         self.detail_text.setHtml(
-            "<h2>{}</h2>{}{}".format(
-                escape(asset.name),
-                "".join(
-                    f"<p><b>{escape(label)}</b><br>{escape(str(value or '—'))}</p>"
-                    for label, value in fields
-                ),
+            (
+                "<div style='background:#FFFFFF; color:#17212B;'>"
+                "{}{}{}{}"
+                "</div>"
+            ).format(
+                self._asset_summary_html(asset, media),
+                body,
                 storage_html,
+                card_html(system_group[0], system_group[1], "#F7FAFC"),
             )
         )
         self._load_history_filter(asset.asset_id)
@@ -489,23 +581,80 @@ class MainWindow(QMainWindow):
         changes = self.service.list_changes(
             asset.asset_id, field_name=str(self.history_filter.currentData() or "")
         )
-        self.history_text.setHtml(
-            "".join(
-                (
-                    f"<h3>{escape(change.event_type)} · {escape(change.field_name)}</h3>"
-                    f"<p>{escape(change.old_value or '—')} → "
-                    f"<b>{escape(change.new_value or '—')}</b></p>"
-                    f"<p style='color:#667085'>{escape(change.changed_at)} · "
-                    f"{escape(change.operator)}"
-                    f"{' · ' + escape(change.note) if change.note else ''}</p>"
-                )
-                for change in changes
-            )
-            or "暂无变化记录"
-        )
+        self.history_text.setHtml(self._history_html(changes))
         self.history_refresh_label.setText(
             f"最近刷新 {datetime.now().strftime('%H:%M:%S')}"
         )
+
+    @staticmethod
+    def _history_html(changes) -> str:
+        if not changes:
+            return (
+                "<div style='background:#F7FAFC; border:1px solid #E3EBEF; "
+                "padding:14px; color:#667085;'>暂无变化记录</div>"
+            )
+        grouped: dict[str, list] = {}
+        for change in changes:
+            key = change.event_group_id or change.change_id
+            grouped.setdefault(key, []).append(change)
+
+        colors = ["#F7FAFC", "#F8FBF7", "#FFF8E7", "#F7F8FC"]
+        accents = ["#2F80ED", "#0F766E", "#D89E00", "#6B7280"]
+
+        def unique(values: list[str]) -> list[str]:
+            return list(dict.fromkeys(value for value in values if value))
+
+        cards = []
+        for index, group in enumerate(grouped.values()):
+            first = group[0]
+            event_title = " / ".join(unique([change.event_type for change in group]))
+            note = f" · {escape(first.note)}" if first.note else ""
+            rows = "".join(
+                (
+                    "<tr>"
+                    "<td style='border-top:1px solid #E3EBEF; padding:8px 0;'>"
+                    f"<div style='color:#0F3D3E; font-weight:700;'>"
+                    f"{escape(change.event_type)}"
+                    f"{'' if change.field_name == '*' else ' · ' + escape(change.field_name)}"
+                    "</div>"
+                    f"<div style='color:#17212B; margin-top:4px;'>"
+                    f"{escape(change.old_value or '—')} → "
+                    f"<b>{escape(change.new_value or '—')}</b>"
+                    "</div>"
+                    "</td>"
+                    "</tr>"
+                )
+                for change in group
+            )
+            cards.append(
+                (
+                    "<table width='100%' cellspacing='0' cellpadding='10' "
+                    f"style='background:{colors[index % len(colors)]}; "
+                    "border:1px solid #DDE8EE; border-collapse:separate; "
+                    "margin:0 0 12px 0;'>"
+                    "<tr><td>"
+                    "<table width='100%' cellspacing='0' cellpadding='0'>"
+                    "<tr>"
+                    f"<td style='border-left:4px solid {accents[index % len(accents)]}; "
+                    "padding-left:8px;'>"
+                    f"<div style='font-size:15px; color:#0F3D3E; font-weight:700;'>"
+                    f"{escape(event_title)}</div>"
+                    f"<div style='color:#667085; margin-top:4px;'>"
+                    f"{escape(first.changed_at)} · {escape(first.operator)}{note}</div>"
+                    "</td>"
+                    "<td align='right' style='color:#344054; font-weight:700;'>"
+                    f"{len(group)} 项变化</td>"
+                    "</tr>"
+                    "</table>"
+                    "<table width='100%' cellspacing='0' cellpadding='0' "
+                    "style='margin-top:8px; border-collapse:collapse;'>"
+                    f"{rows}"
+                    "</table>"
+                    "</td></tr>"
+                    "</table>"
+                )
+            )
+        return "<div style='background:#FFFFFF; color:#17212B;'>" + "".join(cards) + "</div>"
 
     def create_asset(self) -> None:
         dialog = AssetDialog(self.service, parent=self)
@@ -520,6 +669,38 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"已新增 {created.name}", 5000)
         except Exception as exc:
             self._show_write_error("新增失败", exc)
+
+    def copy_selected_asset(self, *_args) -> None:
+        asset = self._selected_asset()
+        if not asset:
+            QMessageBox.information(self, "请选择设备", "请先选择需要复制的设备。")
+            return
+        dialog = AssetDialog(self.service, asset, self, copy_mode=True)
+        if dialog.exec() != AssetDialog.DialogCode.Accepted:
+            return
+        try:
+            created = self.service.create_asset(
+                dialog.asset_data(),
+                dialog.storage_media_data(),
+                dialog.change_note() or f"复制自 {asset.asset_id}",
+            )
+            self.recently_copied_asset_id = created.asset_id
+            self.refresh_after_copy(created.asset_id)
+            self.statusBar().showMessage(f"已复制生成 {created.name}", 5000)
+        except Exception as exc:
+            self._show_write_error("复制失败", exc)
+
+    def show_selected_asset_detail(self) -> None:
+        if not self._selected_asset():
+            return
+        self.show_selected_asset()
+        self.detail_tabs.setCurrentIndex(0)
+
+    def show_selected_asset_history(self) -> None:
+        if not self._selected_asset():
+            return
+        self.show_selected_asset()
+        self.detail_tabs.setCurrentIndex(1)
 
     def edit_selected_asset(self, *_args) -> None:
         asset = self._selected_asset()
@@ -587,6 +768,43 @@ class MainWindow(QMainWindow):
     def _category_clicked(self, *_args) -> None:
         self.refresh_assets()
 
+    def _open_asset_context_menu(self, position) -> None:
+        if self._select_asset_row_at_context_position(position):
+            menu = self._build_asset_row_context_menu()
+        else:
+            menu = self._build_asset_blank_context_menu()
+        menu.exec(self.asset_table.viewport().mapToGlobal(position))
+
+    def _select_asset_row_at_context_position(self, position) -> bool:
+        item = self.asset_table.itemAt(position)
+        if not item:
+            return False
+        self.asset_table.selectRow(item.row())
+        return True
+
+    def _build_asset_row_context_menu(self) -> QMenu:
+        menu = QMenu(self)
+        self._add_context_action(menu, "查看详情", self.show_selected_asset_detail)
+        self._add_context_action(menu, "查看变化记录", self.show_selected_asset_history)
+        self._add_context_action(menu, "编辑设备", self.edit_selected_asset)
+        self._add_context_action(menu, "复制为新设备", self.copy_selected_asset)
+        menu.addSeparator()
+        self._add_context_action(menu, "刷新列表", self.refresh_all)
+        return menu
+
+    def _build_asset_blank_context_menu(self) -> QMenu:
+        menu = QMenu(self)
+        self._add_context_action(menu, "新增设备", self.create_asset)
+        self._add_context_action(menu, "刷新列表", self.refresh_all)
+        return menu
+
+    @staticmethod
+    def _add_context_action(menu: QMenu, text: str, callback) -> QAction:
+        action = QAction(text, menu)
+        action.triggered.connect(lambda _checked=False, callback=callback: callback())
+        menu.addAction(action)
+        return action
+
     def _selected_asset(self) -> Asset | None:
         items = self.asset_table.selectedItems()
         if not items:
@@ -603,6 +821,16 @@ class MainWindow(QMainWindow):
             if self.asset_table.item(row, 0).data(Qt.ItemDataRole.UserRole) == asset_id:
                 self.asset_table.selectRow(row)
                 break
+
+    def refresh_after_copy(self, asset_id: str) -> None:
+        self.refresh_filters()
+        self.refresh_assets()
+        if not any(asset.asset_id == asset_id for asset in self.assets):
+            self.clear_filters()
+        self._select_asset(asset_id)
+        self.show_selected_asset()
+        self.detail_tabs.setCurrentIndex(0)
+        self._update_refresh_label()
 
     def refresh_after_save(self, asset_id: str) -> None:
         self.refresh_filters()
@@ -656,6 +884,51 @@ class MainWindow(QMainWindow):
                 return
             iterator += 1
 
+    def _update_copied_selection_style(self, selected_asset_id: str) -> None:
+        if self.recently_copied_asset_id and selected_asset_id == self.recently_copied_asset_id:
+            self.asset_table.setStyleSheet(
+                "QTableWidget::item:selected { background: #FFF4CC; color: #17212B; }"
+            )
+        else:
+            self.asset_table.setStyleSheet("")
+
+    @staticmethod
+    def _asset_summary_html(asset: Asset, media) -> str:
+        status_color = STATUS_COLORS.get(asset.status, "#F1F3F4")
+        media_text = f"{len(media)} 个存储介质" if media else "无存储介质"
+        tag_text = "已打印标签" if asset.label_printed else "未打印标签"
+        owner_text = " / ".join(value for value in (asset.department, asset.owner) if value) or "未分配"
+        user_text = " / ".join(value for value in (asset.use_department, asset.user) if value) or "未分配"
+        return (
+            "<table width='100%' cellspacing='0' cellpadding='12' "
+            "style='background:#F7FBFC; border:1px solid #D6E1E5; "
+            "border-collapse:separate; margin:0 0 12px 0;'>"
+            "<tr>"
+            "<td colspan='2'>"
+            "<div style='color:#667085; font-size:12px; font-weight:700;'>资产概览</div>"
+            f"<div style='color:#0F3D3E; font-size:22px; font-weight:800; margin-top:4px;'>{escape(asset.name or '未命名设备')}</div>"
+            f"<div style='color:#667085; margin-top:4px;'>{escape(asset.asset_id)}"
+            f"{' · ' + escape(asset.equipment_code) if asset.equipment_code else ''}</div>"
+            "</td>"
+            "<td align='right'>"
+            f"<span style='background:{status_color}; color:#17212B; padding:5px 10px; "
+            "font-weight:700;'>当前状态："
+            f"{escape(asset.status or '未设置')}</span>"
+            "</td>"
+            "</tr>"
+            "<tr>"
+            f"<td style='color:#344054;'><b>存放地点</b><br>{escape(asset.location or '未设置')}</td>"
+            f"<td style='color:#344054;'><b>管理归属</b><br>{escape(owner_text)}</td>"
+            f"<td style='color:#344054;'><b>使用归属</b><br>{escape(user_text)}</td>"
+            "</tr>"
+            "<tr>"
+            f"<td style='color:#344054;'><b>金额</b><br>¥ {asset.price:,.2f}</td>"
+            f"<td style='color:#344054;'><b>标签状态</b><br>{escape(tag_text)}</td>"
+            f"<td style='color:#344054;'><b>存储介质</b><br>{escape(media_text)}</td>"
+            "</tr>"
+            "</table>"
+        )
+
     def _update_refresh_label(self) -> None:
         loaded_at = self.service.cache_status.loaded_at
         self.last_refresh_time = loaded_at.split(" ")[-1] if loaded_at else ""
@@ -683,33 +956,111 @@ class MainWindow(QMainWindow):
     def _apply_style(self) -> None:
         self.setStyleSheet(
             """
-            QMainWindow, QWidget { background: #F6F8FA; color: #17212B; font-size: 13px;
-                                   font-family: "Microsoft YaHei UI", "Segoe UI"; }
-            #appHeader { background: #FFFFFF; border-bottom: 1px solid #D9E0E7; }
-            #appTitle { font-size: 20px; font-weight: 700; padding: 10px 4px; }
+            QMainWindow, QWidget {
+                background: #F4F7F8;
+                color: #17212B;
+                font-size: 13px;
+                font-family: "Microsoft YaHei UI", "Segoe UI";
+            }
+            #appHeader {
+                background: #FFFFFF;
+                border-bottom: 1px solid #D6E1E5;
+            }
+            #appTitle {
+                color: #0F3D3E;
+                font-size: 20px;
+                font-weight: 700;
+                padding: 10px 4px;
+            }
             #pathLabel, #mutedLabel { color: #667085; }
-            #sidePanel, #detailPanel { background: #FFFFFF; }
-            #sidePanel { border-right: 1px solid #D9E0E7; }
-            #detailPanel { border-left: 1px solid #D9E0E7; }
-            #sectionLabel { color: #344054; font-weight: 700; margin-top: 8px; }
-            QPushButton { min-height: 30px; padding: 0 10px; border: 1px solid #C9D2DC;
-                          background: #FFFFFF; border-radius: 4px; }
-            QPushButton:hover { background: #F0F5FA; }
-            QPushButton:pressed, QPushButton:checked { background: #E1ECF7; border-color: #6A94B8; }
-            #primaryButton { background: #1769AA; color: white; border-color: #1769AA; font-weight: 600; }
+            #sidePanel, #detailPanel {
+                background: #FFFFFF;
+            }
+            #sidePanel {
+                border-right: 1px solid #D6E1E5;
+            }
+            #detailPanel {
+                border-left: 1px solid #D6E1E5;
+            }
+            #sectionLabel {
+                color: #0F3D3E;
+                font-weight: 700;
+                margin-top: 8px;
+                padding: 4px 0;
+            }
+            QPushButton {
+                min-height: 30px;
+                padding: 0 10px;
+                border: 1px solid #BFD0D6;
+                background: #FFFFFF;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background: #EEF8F6;
+                border-color: #7EBDB7;
+            }
+            QPushButton:pressed, QPushButton:checked {
+                background: #DDF2EF;
+                border-color: #0F766E;
+                color: #0F3D3E;
+            }
+            #primaryButton {
+                background: #0F766E;
+                color: white;
+                border-color: #0F766E;
+                font-weight: 600;
+            }
+            #primaryButton:hover { background: #11887F; }
             QLineEdit, QComboBox, QDoubleSpinBox, QPlainTextEdit {
-                min-height: 30px; border: 1px solid #C9D2DC; border-radius: 4px; background: white;
+                min-height: 30px; border: 1px solid #BFD0D6; border-radius: 5px; background: white;
                 padding: 0 7px;
             }
+            QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus {
+                border-color: #0F766E;
+            }
             QTableWidget, QTreeWidget, QTextBrowser, QListWidget {
-                background: white; border: 1px solid #D9E0E7; gridline-color: #E8EDF2;
+                background: #FFFFFF;
+                alternate-background-color: #F8FAFB;
+                border: 1px solid #D6E1E5;
+                gridline-color: #E8EEF1;
+                selection-background-color: #EAF4FB;
+                selection-color: #17212B;
+            }
+            QTreeWidget::item { min-height: 24px; padding: 2px 4px; }
+            QTreeWidget::item:selected { background: #EAF4FB; color: #17212B; }
+            QTreeWidget::item:selected:active,
+            QTreeWidget::item:selected:!active,
+            QListWidget::item:selected,
+            QAbstractItemView::item:selected {
+                background: #EAF4FB;
+                color: #17212B;
             }
             QTableWidget::item:selected { background: #EAF4FB; color: #17212B; }
-            QHeaderView::section { background: #EDF2F6; padding: 8px; border: 0;
-                                   border-right: 1px solid #D9E0E7; font-weight: 600; }
-            QTabBar::tab { padding: 9px 14px; background: #EDF2F6; }
-            QTabBar::tab:selected { background: white; border-bottom: 2px solid #1769AA; }
-            QGroupBox { font-weight: 700; border: 1px solid #D9E0E7; margin-top: 12px;
+            QTableWidget::item:selected:active,
+            QTableWidget::item:selected:!active {
+                background: #EAF4FB;
+                color: #17212B;
+            }
+            QComboBox QAbstractItemView::item:selected {
+                background: #EAF4FB;
+                color: #17212B;
+            }
+            QHeaderView::section {
+                background: #E6F0F1;
+                color: #0F3D3E;
+                padding: 8px;
+                border: 0;
+                border-right: 1px solid #D6E1E5;
+                font-weight: 600;
+            }
+            QTabWidget::pane { border: 1px solid #D6E1E5; background: #FFFFFF; }
+            QTabBar::tab { padding: 9px 14px; background: #E7EEF0; }
+            QTabBar::tab:selected {
+                background: #FFFFFF;
+                border-bottom: 2px solid #0F766E;
+                color: #0F3D3E;
+            }
+            QGroupBox { font-weight: 700; border: 1px solid #D6E1E5; margin-top: 12px;
                         padding-top: 14px; background: #FFFFFF; }
             QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
             """
