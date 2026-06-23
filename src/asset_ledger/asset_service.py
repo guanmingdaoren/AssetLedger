@@ -352,6 +352,27 @@ class AssetService:
             workbook.close()
         return self.get_asset(asset_id)
 
+    def delete_asset(self, asset_id: str) -> None:
+        workbook = self._load_for_write()
+        try:
+            asset_sheet = workbook[ASSET_SHEET]
+            row_number = self._find_asset_row(asset_sheet, asset_id)
+            if row_number is None:
+                raise AssetNotFoundError(f"未找到设备：{asset_id}")
+            asset_sheet.delete_rows(row_number, 1)
+            self._ensure_blank_data_row(asset_sheet)
+            self._resize_table(asset_sheet)
+
+            storage_sheet = workbook[STORAGE_SHEET]
+            self._delete_rows_by_asset_id(storage_sheet, asset_id, asset_id_column=2)
+
+            change_sheet = workbook[CHANGE_SHEET]
+            self._delete_rows_by_asset_id(change_sheet, asset_id, asset_id_column=3)
+
+            self._save_and_reload(workbook)
+        finally:
+            workbook.close()
+
     def list_changes(self, asset_id: str, field_name: str = "") -> list[ChangeRecord]:
         records = self._require_snapshot().changes_by_asset_id.get(asset_id, ())
         return [
@@ -1008,6 +1029,22 @@ class AssetService:
                         now,
                         note,
                     )
+
+    @staticmethod
+    def _delete_rows_by_asset_id(sheet, asset_id: str, *, asset_id_column: int) -> int:
+        deleted = 0
+        for row_number in range(sheet.max_row, 1, -1):
+            if str(sheet.cell(row=row_number, column=asset_id_column).value or "") == asset_id:
+                sheet.delete_rows(row_number, 1)
+                deleted += 1
+        AssetService._ensure_blank_data_row(sheet)
+        AssetService._resize_table(sheet)
+        return deleted
+
+    @staticmethod
+    def _ensure_blank_data_row(sheet) -> None:
+        if sheet.max_row == 1:
+            sheet.append([None] * sheet.max_column)
 
     @staticmethod
     def _append_or_replace_blank(sheet, values: list[Any]) -> None:

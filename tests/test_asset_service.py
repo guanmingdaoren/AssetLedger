@@ -13,7 +13,9 @@ from asset_ledger.asset_service import (
 )
 from asset_ledger.excel_repository import (
     ASSET_HEADERS,
+    ASSET_SHEET,
     CATEGORY_SHEET,
+    CHANGE_SHEET,
     ExcelRepository,
     LOCATION_SHEET,
     STORAGE_SHEET,
@@ -175,6 +177,34 @@ class AssetServiceTests(unittest.TestCase):
         )
         self.assertEqual(created.equipment_code, "EQ-002")
 
+    def test_external_workbook_change_blocks_delete_until_reload(self) -> None:
+        created = self.service.create_asset(sample_asset())
+        backups_before = list((self.path.parent / "backups").glob("assets-*.xlsx"))
+        workbook = self.repository.load()
+        workbook["系统配置"]["B4"] = "外部修改"
+        self.repository.save(workbook, create_backup=False)
+        workbook.close()
+
+        with self.assertRaises(WorkbookChangedExternallyError):
+            self.service.delete_asset(created.asset_id)
+
+        self.assertEqual(
+            list((self.path.parent / "backups").glob("assets-*.xlsx")),
+            backups_before,
+        )
+        persisted = self.repository.load(data_only=True)
+        try:
+            self.assertTrue(
+                any(
+                    row[0] == created.asset_id
+                    for row in persisted[ASSET_SHEET].iter_rows(
+                        min_row=2, values_only=True
+                    )
+                )
+            )
+        finally:
+            persisted.close()
+
     def test_failed_manual_reload_keeps_old_cache_and_blocks_writes(self) -> None:
         created = self.service.create_asset(sample_asset())
         original_bytes = self.path.read_bytes()
@@ -329,6 +359,58 @@ class AssetServiceTests(unittest.TestCase):
         self.assertEqual(len(media), 2)
         self.assertTrue(all(item.storage_id.startswith("MED-") for item in media))
         self.assertEqual({item.asset_id for item in media}, {created.asset_id})
+
+    def test_delete_asset_removes_asset_storage_and_history_and_creates_backup(self) -> None:
+        created = self.service.create_asset(sample_asset(), [sample_storage()])
+        self.service.update_asset(
+            created.asset_id,
+            sample_asset(status="维修", location="仓库"),
+            "删除前变更",
+        )
+        self.assertGreater(len(self.service.list_changes(created.asset_id)), 0)
+
+        self.service.delete_asset(created.asset_id)
+
+        self.assertEqual(self.service.list_assets(), [])
+        self.assertEqual(self.service.list_storage_media(created.asset_id), [])
+        self.assertEqual(self.service.list_changes(created.asset_id), [])
+        backups = list((self.path.parent / "backups").glob("*.xlsx"))
+        self.assertGreaterEqual(len(backups), 1)
+        with self.assertRaises(AssetServiceError):
+            self.service.get_asset(created.asset_id)
+
+        workbook = self.repository.load(data_only=True)
+        try:
+            self.assertFalse(
+                any(
+                    row[0] == created.asset_id
+                    for row in workbook[ASSET_SHEET].iter_rows(
+                        min_row=2, values_only=True
+                    )
+                )
+            )
+            self.assertFalse(
+                any(
+                    row[1] == created.asset_id
+                    for row in workbook[STORAGE_SHEET].iter_rows(
+                        min_row=2, values_only=True
+                    )
+                )
+            )
+            self.assertFalse(
+                any(
+                    row[2] == created.asset_id
+                    for row in workbook[CHANGE_SHEET].iter_rows(
+                        min_row=2, values_only=True
+                    )
+                )
+            )
+        finally:
+            workbook.close()
+
+    def test_delete_asset_rejects_missing_asset(self) -> None:
+        with self.assertRaisesRegex(AssetServiceError, "未找到设备"):
+            self.service.delete_asset("AST-2099-000001")
 
     def test_blank_storage_capacity_is_saved_as_empty_excel_cell(self) -> None:
         self.service.create_asset(

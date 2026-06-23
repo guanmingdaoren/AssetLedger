@@ -185,6 +185,9 @@ class MainWindow(QMainWindow):
             self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView)
         )
         edit_button.clicked.connect(self.edit_selected_asset)
+        delete_button = QPushButton("删除")
+        delete_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon))
+        delete_button.clicked.connect(self.delete_selected_asset)
         refresh_button = QPushButton("刷新")
         refresh_button.setToolTip("重新读取 Excel 工作簿")
         refresh_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
@@ -193,6 +196,7 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(new_button)
         toolbar.addWidget(copy_button)
         toolbar.addWidget(edit_button)
+        toolbar.addWidget(delete_button)
         toolbar.addWidget(refresh_button)
         layout.addLayout(toolbar)
 
@@ -722,6 +726,43 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._show_write_error("保存失败", exc)
 
+    def delete_selected_asset(self, *_args) -> None:
+        asset = self._selected_asset()
+        if not asset:
+            QMessageBox.information(self, "请选择设备", "请先选择需要删除的设备。")
+            return
+        media_count = len(self.service.list_storage_media(asset.asset_id))
+        change_count = len(self.service.list_changes(asset.asset_id))
+        message = (
+            "确认删除这台设备及其关联信息吗？\n\n"
+            f"设备器材：{asset.name or '—'}\n"
+            f"资产UID：{asset.asset_id}\n"
+            f"bm编码：{asset.equipment_code or '—'}\n"
+            f"资产唯一标识符：{asset.asset_identifier or '—'}\n"
+            f"关联数据：{media_count} 个存储介质，{change_count} 条变化记录\n\n"
+            "删除后，该设备、存储介质和变化记录会从当前台账中移除；"
+            "如需找回，只能从删除前自动备份中恢复。"
+        )
+        result = QMessageBox.question(
+            self,
+            "确认删除设备",
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if result != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            deleted_name = asset.name
+            deleted_asset_id = asset.asset_id
+            self.service.delete_asset(asset.asset_id)
+            if self.recently_copied_asset_id == deleted_asset_id:
+                self.recently_copied_asset_id = ""
+            self.refresh_all(reload_cache=False)
+            self.statusBar().showMessage(f"已删除 {deleted_name}", 5000)
+        except Exception as exc:
+            self._show_write_error("删除失败", exc)
+
     def open_settings(self) -> None:
         dialog = SettingsDialog(self.service, self.workbook_path, self)
         if dialog.exec() != SettingsDialog.DialogCode.Accepted:
@@ -788,6 +829,7 @@ class MainWindow(QMainWindow):
         self._add_context_action(menu, "查看变化记录", self.show_selected_asset_history)
         self._add_context_action(menu, "编辑设备", self.edit_selected_asset)
         self._add_context_action(menu, "复制为新设备", self.copy_selected_asset)
+        self._add_context_action(menu, "删除设备", self.delete_selected_asset)
         menu.addSeparator()
         self._add_context_action(menu, "刷新列表", self.refresh_all)
         return menu

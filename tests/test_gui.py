@@ -251,7 +251,7 @@ class GuiTests(unittest.TestCase):
         actions = [action.text() for action in menu.actions() if not action.isSeparator()]
         self.assertEqual(
             actions,
-            ["查看详情", "查看变化记录", "编辑设备", "复制为新设备", "刷新列表"],
+            ["查看详情", "查看变化记录", "编辑设备", "复制为新设备", "删除设备", "刷新列表"],
         )
         self.assertEqual(
             window.asset_table.contextMenuPolicy(),
@@ -299,6 +299,45 @@ class GuiTests(unittest.TestCase):
         menu.actions()[1].trigger()
         self.assertEqual(window.detail_tabs.currentIndex(), 1)
         self.assertIn("使用状态变更", window.history_text.toPlainText())
+        window.close()
+
+    def test_delete_selected_asset_cancel_keeps_asset_and_shows_summary(self) -> None:
+        asset = self.service.create_asset(sample_asset(), [sample_storage()])
+        self.service.update_asset(asset.asset_id, sample_asset(status="维修"), "送修")
+        window = MainWindow(self.service, self.path)
+        window._select_asset(asset.asset_id)
+
+        with patch.object(
+            QMessageBox,
+            "question",
+            return_value=QMessageBox.StandardButton.No,
+        ) as question:
+            window.delete_selected_asset()
+
+        self.assertEqual([item.asset_id for item in self.service.list_assets()], [asset.asset_id])
+        message = question.call_args.args[2]
+        self.assertIn(asset.asset_id, message)
+        self.assertIn("1 个存储介质", message)
+        self.assertIn("变化记录", message)
+        window.close()
+
+    def test_delete_selected_asset_removes_asset_and_refreshes_table(self) -> None:
+        asset = self.service.create_asset(sample_asset(), [sample_storage()])
+        window = MainWindow(self.service, self.path)
+        window._select_asset(asset.asset_id)
+
+        with patch.object(
+            QMessageBox,
+            "question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ):
+            window.delete_selected_asset()
+        self.application.processEvents()
+
+        self.assertEqual(self.service.list_assets(), [])
+        self.assertEqual(window.asset_table.rowCount(), 0)
+        self.assertIn("未选择设备", window.detail_text.toPlainText())
+        self.assertEqual(window.history_text.toPlainText(), "")
         window.close()
 
     def test_main_window_filters_unassigned_owner(self) -> None:
