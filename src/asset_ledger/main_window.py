@@ -135,16 +135,12 @@ class MainWindow(QMainWindow):
         self.status_filter = self._filter_combo("全部使用状态")
         self.location_filter = self._filter_combo("全部位置")
         self.brand_filter = self._filter_combo("全部品牌")
-        self.owner_filter = self._filter_combo("全部管理人")
         self.user_filter = self._filter_combo("全部使用人")
-        self.source_filter = self._filter_combo("全部取得方式")
         for combo in (
             self.status_filter,
             self.location_filter,
             self.brand_filter,
-            self.owner_filter,
             self.user_filter,
-            self.source_filter,
         ):
             combo.currentTextChanged.connect(self.refresh_assets)
             layout.addWidget(combo)
@@ -293,25 +289,19 @@ class MainWindow(QMainWindow):
             self.status_filter: self.status_filter.currentData(),
             self.location_filter: self.location_filter.currentData(),
             self.brand_filter: self.brand_filter.currentData(),
-            self.owner_filter: self.owner_filter.currentData(),
             self.user_filter: self.user_filter.currentData(),
-            self.source_filter: self.source_filter.currentData(),
         }
         options = {
             self.status_filter: sorted({asset.status for asset in assets if asset.status}),
             self.location_filter: sorted({asset.location for asset in assets if asset.location}),
             self.brand_filter: sorted({asset.brand for asset in assets if asset.brand}),
-            self.owner_filter: self.service.list_owners(),
             self.user_filter: self.service.list_users(),
-            self.source_filter: sorted({asset.source for asset in assets if asset.source}),
         }
         for combo, values in options.items():
             label = combo.itemText(0)
             combo.blockSignals(True)
             combo.clear()
             combo.addItem(label, "")
-            if combo is self.owner_filter:
-                combo.addItem("未分配管理人", None)
             if combo is self.user_filter:
                 combo.addItem("未分配使用人", None)
             for value in values:
@@ -358,9 +348,7 @@ class MainWindow(QMainWindow):
             ("status", self.status_filter),
             ("location", self.location_filter),
             ("brand", self.brand_filter),
-            ("owner", self.owner_filter),
             ("user", self.user_filter),
-            ("source", self.source_filter),
         ):
             value = combo.currentData()
             if value != "":
@@ -787,9 +775,7 @@ class MainWindow(QMainWindow):
             self.status_filter,
             self.location_filter,
             self.brand_filter,
-            self.owner_filter,
             self.user_filter,
-            self.source_filter,
         ):
             combo.setCurrentIndex(0)
         self.category_tree.setCurrentItem(None)

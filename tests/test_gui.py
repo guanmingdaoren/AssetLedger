@@ -340,18 +340,22 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(window.history_text.toPlainText(), "")
         window.close()
 
-    def test_main_window_filters_unassigned_owner(self) -> None:
-        self.service.create_asset(sample_asset())
-        self.service.create_asset(
-            sample_asset(equipment_code="EQ-002", serial_number="SN-002", owner="")
-        )
+    def test_main_window_filter_conditions_hide_owner_and_source(self) -> None:
         window = MainWindow(self.service, self.path)
 
-        window.owner_filter.setCurrentIndex(window.owner_filter.findText("未分配管理人"))
-        self.application.processEvents()
+        filter_labels = [
+            combo.itemText(0)
+            for combo in window.findChildren(NoWheelComboBox)
+        ]
 
-        self.assertEqual(window.asset_table.rowCount(), 1)
-        self.assertEqual(window.asset_table.item(0, 2).text(), "EQ-002")
+        self.assertIn("全部使用状态", filter_labels)
+        self.assertIn("全部位置", filter_labels)
+        self.assertIn("全部品牌", filter_labels)
+        self.assertIn("全部使用人", filter_labels)
+        self.assertNotIn("全部管理人", filter_labels)
+        self.assertNotIn("全部取得方式", filter_labels)
+        self.assertFalse(hasattr(window, "owner_filter"))
+        self.assertFalse(hasattr(window, "source_filter"))
         window.close()
 
     def test_main_window_filters_user_and_shows_storage_in_detail(self) -> None:
@@ -536,18 +540,18 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(critical.call_args.args[1], "Excel 已保存，请勿重复操作")
         window.close()
 
-    def test_refresh_preserves_unassigned_owner_filter(self) -> None:
+    def test_refresh_preserves_unassigned_user_filter(self) -> None:
         self.service.create_asset(sample_asset())
         self.service.create_asset(
-            sample_asset(equipment_code="EQ-002", serial_number="SN-002", owner="")
+            sample_asset(equipment_code="EQ-002", serial_number="SN-002", user="")
         )
         window = MainWindow(self.service, self.path)
-        window.owner_filter.setCurrentIndex(window.owner_filter.findText("未分配管理人"))
+        window.user_filter.setCurrentIndex(window.user_filter.findText("未分配使用人"))
 
         window.refresh_all()
         self.application.processEvents()
 
-        self.assertEqual(window.owner_filter.currentText(), "未分配管理人")
+        self.assertEqual(window.user_filter.currentText(), "未分配使用人")
         self.assertEqual(window.asset_table.rowCount(), 1)
         window.close()
 
